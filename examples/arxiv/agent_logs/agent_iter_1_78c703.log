@@ -1,0 +1,35 @@
+=== Iteration 1 ===
+Commit: 78c703
+Cost: $5.5134
+Duration: 790.2s
+Error: False
+
+--- Worker Output ---
+All tasks complete. Here's a summary of what was accomplished in this iteration:
+
+## Iteration 5 Summary: Visual Polish & Appendix
+
+**All 10 automated tests pass. Paper is 6 pages.**
+
+### Changes Made:
+
+1. **Fixed Table 4 & 5 footnote layouts** - Moved floating footnotes into table captions to eliminate the artifact where footnote text appeared to the right of table rows
+
+2. **Polished Figure 1 (System Overview)**:
+   - Fixed feedback loop arrow: now routes cleanly along the right margin without crossing through the tools or stages boxes
+   - Fixed dotted line from Success Criteria: routes to stages box along the far right
+   - Improved colors with stronger borders and bidirectional arrows for tool/stage connections
+
+3. **Polished Figure 2 (Convergence)**:
+   - Added green shaded region above the 8.0 threshold to visually indicate the passing zone
+   - Moved legend to bottom-right to avoid overlap with data points and cost annotations
+   - White background on legend box for readability
+
+4. **Polished Figure 3 (Token Usage)**:
+   - Improved bar color with blue-green tint and added y-axis gridlines
+
+5. **Added Appendix A (Configuration and Usage)**:
+   - Documents the three required user-defined files
+   - CLI usage example, evaluator output format, and full RunConfig parameter listing
+
+6. **Condensed text** in Convergence/Termination, Ablation, Framework Comparison, and Conclusion sections to accommodate the appendix within the 6-page limit

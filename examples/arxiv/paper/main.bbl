@@ -1,0 +1,72 @@
+\begin{thebibliography}{10}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[{Anthropic}(2025)]{anthropic2025claude}
+{Anthropic}.
+\newblock The claude model card and system prompt.
+\newblock \emph{Anthropic Technical Report}, 2025.
+\newblock URL \url{https://www.anthropic.com/claude}.
+
+\bibitem[Chase(2022)]{chase2022langchain}
+Harrison Chase.
+\newblock {LangChain}: Building applications with {LLMs} through composability.
+\newblock 2022.
+\newblock URL \url{https://github.com/langchain-ai/langchain}.
+
+\bibitem[Chen et~al.(2021)Chen, Tworek, Jun, Yuan, et~al.]{chen2021codex}
+Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, et~al.
+\newblock Evaluating large language models trained on code.
+\newblock \emph{arXiv preprint arXiv:2107.03374}, 2021.
+
+\bibitem[{Cognition Labs}(2024)]{cognition2024devin}
+{Cognition Labs}.
+\newblock Devin: The first {AI} software engineer.
+\newblock 2024.
+\newblock URL \url{https://www.cognition-labs.com/devin}.
+
+\bibitem[Gauthier(2024)]{gauthier2024aider}
+Paul Gauthier.
+\newblock Aider: {AI} pair programming in your terminal.
+\newblock 2024.
+\newblock URL \url{https://aider.chat}.
+
+\bibitem[Jimenez et~al.(2024)Jimenez, Yang, Wettig, Yao, Peri, and
+  Narasimhan]{jimenez2024swebench}
+Carlos~E Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Peri, and
+  Karthik Narasimhan.
+\newblock {SWE-bench}: Can language models resolve real-world {GitHub} issues?
+\newblock \emph{arXiv preprint arXiv:2310.06770}, 2024.
+
+\bibitem[Shinn et~al.(2023)Shinn, Cassano, Gopinath, Narasimhan, and
+  Yao]{shinn2023reflexion}
+Noah Shinn, Federico Cassano, Ashwin Gopinath, Karthik Narasimhan, and Shunyu
+  Yao.
+\newblock Reflexion: Language agents with verbal reinforcement learning.
+\newblock \emph{Advances in Neural Information Processing Systems}, 36, 2023.
+
+\bibitem[Wang et~al.(2024)Wang, Ding, et~al.]{wang2024openhands}
+Xingyao Wang, Boxuan Ding, et~al.
+\newblock {OpenHands}: An open platform for {AI} software developers as
+  generalist agents.
+\newblock \emph{arXiv preprint arXiv:2407.16741}, 2024.
+
+\bibitem[Yang et~al.(2024)Yang, Jimenez, Wettig, Liber, Narasimhan, and
+  Press]{yang2024sweagent}
+John Yang, Carlos~E Jimenez, Alexander Wettig, Kilian Liber, Karthik
+  Narasimhan, and Ofir Press.
+\newblock {SWE-agent}: Agent-computer interfaces enable automated software
+  engineering.
+\newblock \emph{arXiv preprint arXiv:2405.15793}, 2024.
+
+\bibitem[Yao et~al.(2023)Yao, Zhao, Yu, Du, Shafran, Narasimhan, and
+  Cao]{yao2023react}
+Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan,
+  and Yuan Cao.
+\newblock {ReAct}: Synergizing reasoning and acting in language models.
+\newblock \emph{International Conference on Learning Representations}, 2023.
+
+\end{thebibliography}

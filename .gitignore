@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.nfs*
+
+gcloud_forward.sh
+K8S.md

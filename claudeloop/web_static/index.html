@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RUD CLAUDELOOP</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand__name">RUD CLAUDELOOP</span>
+      <span class="brand__tag">agent loop console</span>
+    </div>
+    <div class="topbar__meta">
+      <span>Active root <code id="hdr-project">…</code></span>
+      <span>@skills <code id="hdr-skills">…</code></span>
+      <button type="button" class="btn btn--primary" id="btn-create-open">Create Task</button>
+    </div>
+  </header>
+
+  <nav class="project-bar" aria-label="Registered repositories">
+    <span class="project-bar__hint" id="project-bar-hint">Projects</span>
+    <div class="project-bar__scroll" id="project-toggle-scroll" role="tablist" aria-label="Switch project"></div>
+    <button type="button" class="project-bar__add" id="btn-add-project">+ Add repo</button>
+  </nav>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <section class="sidebar__section">
+        <div class="sidebar__heading-row">
+          <h2 class="sidebar__heading">tmux</h2>
+          <button type="button" class="btn btn--ghost btn--sm" id="btn-tmux-refresh">Refresh</button>
+        </div>
+        <p class="sidebar__hint">Claudeloop sessions for the <strong>selected</strong> project (worker / interview / ask).</p>
+        <ul class="tmux-list" id="tmux-sessions"></ul>
+      </section>
+
+      <section class="sidebar__section">
+        <div class="sidebar__heading-row">
+          <h2 class="sidebar__heading">Tasks</h2>
+          <button type="button" class="btn btn--primary btn--sm" id="btn-tasks-refresh">Refresh</button>
+        </div>
+        <ul class="task-list" id="task-list" aria-live="polite"></ul>
+      </section>
+    </aside>
+
+    <section class="main">
+      <div id="task-empty" class="empty-state">
+        <h1>Select Or Create A Task</h1>
+        <p>Select a project from the bar above, then pick a task here or create a new one.</p>
+        <button type="button" class="btn btn--primary" id="btn-empty-create">Create Task</button>
+      </div>
+
+      <article id="task-view" class="task-view" hidden>
+        <header class="task-view__header">
+          <div class="task-view__header-row">
+            <div class="task-view__heading">
+              <h1 class="task-view__title" id="task-title">…</h1>
+              <div class="task-view__meta">
+                <span class="badge" id="task-slug">…</span>
+                <span id="task-backend"></span>
+              </div>
+            </div>
+            <button type="button" class="btn btn--danger btn--sm" id="btn-delete-task">Delete task</button>
+          </div>
+          <p class="tab-panel__hint" id="task-goal"></p>
+        </header>
+
+        <nav class="tabs" id="main-tabs" role="tablist"></nav>
+
+        <section class="tab-panel active" data-panel="plan" role="tabpanel">
+          <p class="tab-panel__hint">PLAN.md - progress and next steps.</p>
+          <div class="markdown-workbench">
+            <div class="markdown-pane">
+              <div class="pane-label">Edit Markdown</div>
+              <textarea id="editor-plan" class="editor" spellcheck="false"></textarea>
+            </div>
+            <div class="markdown-pane markdown-pane--preview">
+              <div class="pane-label">Preview</div>
+              <div id="preview-plan" class="markdown-preview"></div>
+            </div>
+          </div>
+          <div class="editor__actions">
+            <button type="button" class="btn btn--primary" id="btn-save-plan">Save PLAN.md</button>
+            <span id="status-plan" class="tab-panel__hint"></span>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="task" role="tabpanel" hidden>
+          <p class="tab-panel__hint">TASK_PROMPT.md - task description.</p>
+          <div class="markdown-workbench">
+            <div class="markdown-pane">
+              <div class="pane-label">Edit Markdown</div>
+              <textarea id="editor-task" class="editor" spellcheck="false"></textarea>
+            </div>
+            <div class="markdown-pane markdown-pane--preview">
+              <div class="pane-label">Preview</div>
+              <div id="preview-task" class="markdown-preview"></div>
+            </div>
+          </div>
+          <div class="editor__actions">
+            <button type="button" class="btn btn--primary" id="btn-save-task">Save TASK_PROMPT.md</button>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="success" role="tabpanel" hidden>
+          <p class="tab-panel__hint">SUCCESS_CONDITION.md - success criteria and test commands.</p>
+          <div class="markdown-workbench">
+            <div class="markdown-pane">
+              <div class="pane-label">Edit Markdown</div>
+              <textarea id="editor-success" class="editor" spellcheck="false"></textarea>
+            </div>
+            <div class="markdown-pane markdown-pane--preview">
+              <div class="pane-label">Preview</div>
+              <div id="preview-success" class="markdown-preview"></div>
+            </div>
+          </div>
+          <div class="editor__actions">
+            <button type="button" class="btn btn--primary" id="btn-save-success">Save SUCCESS_CONDITION.md</button>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="interview" role="tabpanel" hidden>
+          <p class="tab-panel__hint">Start a dedicated Claude Code interview pane, answer questions in the web UI, and let it finalize the three task files.</p>
+          <input type="hidden" id="inp-interview-target" />
+          <div class="tab-action-row">
+            <button type="button" class="btn btn--primary" id="btn-interview-start">Start deep-interview</button>
+            <button type="button" class="btn btn--danger" id="btn-interview-stop">Stop deep-interview</button>
+            <span class="action-hint">The interview pane starts only after you click Start deep-interview.</span>
+          </div>
+          <div class="pane-card pane-card--compact">
+            <h4>Interview pane</h4>
+            <div class="pane-target-row">
+              <span>Target</span>
+              <code id="interview-target-label">Not started</code>
+            </div>
+          </div>
+          <div class="pane-card terminal-card terminal-card--interview">
+            <div class="terminal-card__bar">
+              <div class="terminal-card__dots"><span></span><span></span><span></span></div>
+              <h4>Interview Terminal</h4>
+            </div>
+            <pre class="pre-panel pre-panel--interview" id="interview-out">Click Start deep-interview to launch the Claude Code interview pane.</pre>
+          </div>
+          <textarea id="interview-in" rows="3" class="pane-input" placeholder="Answer the deep-interview questions..."></textarea>
+          <div class="pane-actions" data-pane="interview">
+            <button type="button" class="btn btn--primary" id="btn-interview-send">Send + Enter</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Enter">Enter</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Up">↑</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Down">↓</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Left">←</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Right">→</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Escape">Esc</button>
+            <button type="button" class="btn btn--danger btn--sm" data-key="C-c">Ctrl-C</button>
+            <span class="tab-panel__hint">Enter inserts a newline. Click Send + Enter to submit; Claude uses effort=max.</span>
+          </div>
+          <div class="interview-markdown">
+            <p class="tab-panel__hint">INTERVIEW.md - notes and decisions from the deep-interview.</p>
+            <div class="markdown-workbench markdown-workbench--interview">
+              <div class="markdown-pane">
+                <div class="pane-label">Raw Markdown</div>
+                <textarea id="editor-interview" class="editor" spellcheck="false" readonly></textarea>
+              </div>
+              <div class="markdown-pane markdown-pane--preview">
+                <div class="pane-label">Rendered Preview</div>
+                <div id="preview-interview" class="markdown-preview"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="ask" role="tabpanel" hidden>
+          <p class="tab-panel__hint">Start an on-demand Claude Opus ask pane for this task.</p>
+          <input type="hidden" id="inp-ask-target" />
+          <div class="tab-action-row">
+            <button type="button" class="btn btn--primary" id="btn-ask-start">Start ask pane</button>
+            <button type="button" class="btn btn--danger" id="btn-ask-stop">Stop ask pane</button>
+            <span class="action-hint">Runs in `.RUD/&lt;task&gt;/work/` with effort=max.</span>
+          </div>
+          <div class="pane-card pane-card--compact">
+            <h4>Ask pane</h4>
+            <div class="pane-target-row">
+              <span>Target</span>
+              <code id="ask-target-label">Not started</code>
+            </div>
+          </div>
+          <div class="pane-card terminal-card terminal-card--interview">
+            <div class="terminal-card__bar">
+              <div class="terminal-card__dots"><span></span><span></span><span></span></div>
+              <h4>Ask Terminal</h4>
+            </div>
+            <pre class="pre-panel pre-panel--interview" id="ask-out">Click Start ask pane to launch Claude Code for this task.</pre>
+          </div>
+          <textarea id="ask-in" rows="3" class="pane-input" placeholder="Ask about code changes, current run status, logs, or next steps..."></textarea>
+          <div class="pane-actions" data-pane="ask">
+            <button type="button" class="btn btn--primary" id="btn-ask-send">Send + Enter</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Enter">Enter</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Up">↑</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Down">↓</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Left">←</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Right">→</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-key="Escape">Esc</button>
+            <button type="button" class="btn btn--danger btn--sm" data-key="C-c">Ctrl-C</button>
+            <span class="tab-panel__hint">Enter inserts a newline. Click Send + Enter to submit.</span>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="panes" role="tabpanel" hidden>
+          <p class="tab-panel__hint">Starting claudeloop tmux automatically binds the runner/evaluator panes.</p>
+          <input type="hidden" id="inp-runner-target" />
+          <input type="hidden" id="inp-eval-target" />
+          <div class="pane-card pane-card--compact">
+            <h4>Auto Binding</h4>
+            <div class="pane-target-row">
+              <span>Runner</span>
+              <code id="runner-target-label">Not started</code>
+            </div>
+            <div class="pane-target-row">
+              <span>Evaluator</span>
+              <code id="eval-target-label">Not started</code>
+            </div>
+          </div>
+          <div class="pane-grid pane-grid--preview">
+            <div class="pane-card terminal-card">
+              <div class="terminal-card__bar">
+                <div class="terminal-card__dots"><span></span><span></span><span></span></div>
+                <h4>Runner Preview</h4>
+              </div>
+              <pre class="pre-panel pre-panel--pane" id="pre-runner">(not bound)</pre>
+              <textarea id="pane-runner-input" class="pane-input" rows="2" placeholder="Text to send to the runner pane..."></textarea>
+              <div class="pane-actions" data-pane="runner">
+                <button type="button" class="btn btn--primary btn--sm" data-send-text="runner">Send</button>
+                <button type="button" class="btn btn--sm" data-send-text-enter="runner">Send + Enter</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Enter">Enter</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Up">↑</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Down">↓</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Left">←</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Right">→</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Escape">Esc</button>
+                <button type="button" class="btn btn--danger btn--sm" data-key="C-c">Ctrl-C</button>
+                <span class="tab-panel__hint">Enter inserts a newline. Click Send or Send + Enter to submit.</span>
+              </div>
+            </div>
+            <div class="pane-card terminal-card">
+              <div class="terminal-card__bar">
+                <div class="terminal-card__dots"><span></span><span></span><span></span></div>
+                <h4>Evaluator Preview</h4>
+              </div>
+              <pre class="pre-panel pre-panel--pane" id="pre-eval">(not bound)</pre>
+              <textarea id="pane-eval-input" class="pane-input" rows="2" placeholder="Text to send to the evaluator pane..."></textarea>
+              <div class="pane-actions" data-pane="eval">
+                <button type="button" class="btn btn--primary btn--sm" data-send-text="eval">Send</button>
+                <button type="button" class="btn btn--sm" data-send-text-enter="eval">Send + Enter</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Enter">Enter</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Up">↑</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Down">↓</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Left">←</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Right">→</button>
+                <button type="button" class="btn btn--ghost btn--sm" data-key="Escape">Esc</button>
+                <button type="button" class="btn btn--danger btn--sm" data-key="C-c">Ctrl-C</button>
+                <span class="tab-panel__hint">Enter inserts a newline. Click Send or Send + Enter to submit.</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="worker" role="tabpanel" hidden>
+          <p class="tab-panel__hint">Create worktrees under this task's <code>work/</code> directory, then start claudeloop tmux from <code>.RUD/&lt;task&gt;/work/</code>.</p>
+          <div class="tab-action-row">
+            <button type="button" class="btn btn--primary" id="btn-worktrees">Create worktree</button>
+            <span class="action-hint" id="worktree-status"></span>
+          </div>
+          <div class="worker-controls">
+            <label class="worker-field worker-field--mode">Mode
+              <select id="worker-mode"><option value="tmux" selected>tmux</option></select>
+            </label>
+            <label class="worker-field worker-field--model">Model
+              <input type="text" id="worker-model" value="claude-opus-4-7" />
+            </label>
+            <label class="worker-field worker-field--rounds">Max rounds
+              <input type="number" id="worker-iters" value="200" min="1" />
+            </label>
+            <div class="worker-buttons">
+              <button type="button" class="btn btn--primary" id="btn-worker-start">Start worker</button>
+              <button type="button" class="btn btn--danger" id="btn-worker-stop">Stop task</button>
+              <button type="button" class="btn" id="btn-worker-push">Publish branches</button>
+              <button type="button" class="btn" id="btn-worker-refresh">Refresh log</button>
+            </div>
+          </div>
+          <div class="worker-status-card" id="worker-status-card" data-worker-phase="idle">
+            <div class="worker-status-card__head">
+              <div class="worker-status-bar">
+                <span class="worker-status-bar__label">Status</span>
+                <strong id="worker-status-text" class="worker-status-badge worker-status-badge--idle">Idle</strong>
+              </div>
+              <div class="worker-status-card__round" id="worker-round-text">Round - / -</div>
+            </div>
+            <div class="worker-progress" id="worker-progress">
+              <div class="worker-progress__bar" id="worker-progress-bar"></div>
+            </div>
+            <p class="worker-status-card__meta" id="worker-status-meta">No worker selected.</p>
+          </div>
+          <div class="pane-card terminal-card terminal-card--log">
+            <div class="terminal-card__bar">
+              <div class="terminal-card__dots"><span></span><span></span><span></span></div>
+              <h4>Worker Log</h4>
+            </div>
+            <pre class="pre-panel pre-panel--log" id="log-pre">(no logs)</pre>
+          </div>
+        </section>
+      </article>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="create-modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="create-modal-title">
+      <div class="modal-card__header">
+        <div>
+          <h2 id="create-modal-title">Create Task</h2>
+          <p>Describe the task. claudeloop will create `.RUD/&lt;slug&gt;/` under the current project.</p>
+        </div>
+        <button type="button" class="icon-btn" id="btn-create-close" aria-label="Close">×</button>
+      </div>
+
+      <div class="modal-card__body">
+        <p class="skills-note">Default @skills: <code>claudeloop/skills/AK_skills.md</code></p>
+        <label>Title</label>
+        <input type="text" id="new-title" placeholder="Example: xorl1" />
+        <label>General goal</label>
+        <textarea id="new-goal" rows="5" placeholder="Write the general task first; deep-interview will ask about anything unclear."></textarea>
+      </div>
+
+      <div class="modal-card__footer">
+        <span id="new-task-status" class="tab-panel__hint"></span>
+        <button type="button" class="btn" id="btn-create-cancel">Cancel</button>
+        <button type="button" class="btn btn--primary" id="btn-new-task">Create Task</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="add-project-modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="add-project-modal-title">
+      <div class="modal-card__header">
+        <div>
+          <h2 id="add-project-modal-title">Add project</h2>
+          <p>Register an absolute path to a git repository root. Nothing is written outside that tree. Immediate subfolders of the server launch directory appear below for quick selection.</p>
+        </div>
+        <button type="button" class="icon-btn" id="btn-add-project-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-card__body">
+        <div id="add-project-launch-wrap" class="add-project-launch-wrap" hidden>
+          <p class="modal-subhint">Subfolders of <code id="add-project-launch-root"></code> — click a name to fill the path, then Add.</p>
+          <div class="add-project-chips" id="add-project-chips" role="group" aria-label="Launch directory subfolders"></div>
+        </div>
+        <label>Project directory</label>
+        <input type="text" id="new-project-path" class="modal-input-wide" placeholder="/home/you/MyRepo" spellcheck="false" />
+      </div>
+      <div class="modal-card__footer">
+        <span id="add-project-status" class="tab-panel__hint"></span>
+        <button type="button" class="btn" id="btn-add-project-cancel">Cancel</button>
+        <button type="button" class="btn btn--primary" id="btn-add-project-save">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="worktree-select-modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="worktree-select-modal-title">
+      <div class="modal-card__header">
+        <div>
+          <h2 id="worktree-select-modal-title">Select repositories</h2>
+          <p>The selected work directory is a container, not a git repo. Choose which direct child repos to create worktrees for.</p>
+        </div>
+        <button type="button" class="icon-btn" id="btn-worktree-select-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-card__body">
+        <div id="worktree-select-list" class="worktree-select-list"></div>
+      </div>
+      <div class="modal-card__footer">
+        <span id="worktree-select-status" class="tab-panel__hint"></span>
+        <button type="button" class="btn" id="btn-worktree-select-cancel">Cancel</button>
+        <button type="button" class="btn btn--primary" id="btn-worktree-select-create">Create selected</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="preview-modal" id="preview-modal" hidden>
+    <div class="preview-modal__card" role="dialog" aria-modal="true" aria-labelledby="preview-modal-title">
+      <header class="preview-modal__header">
+        <div>
+          <p class="preview-modal__eyebrow">Fullscreen Preview</p>
+          <h2 id="preview-modal-title">Preview</h2>
+        </div>
+        <div class="preview-modal__actions">
+          <button type="button" class="btn" id="btn-preview-print">Print / Save PDF</button>
+          <button type="button" class="btn" id="btn-preview-exit-fullscreen">Exit Fullscreen</button>
+          <button type="button" class="icon-btn" id="btn-preview-close" aria-label="Close">×</button>
+        </div>
+      </header>
+      <main class="preview-modal__body">
+        <article id="preview-modal-content" class="markdown-preview markdown-preview--fullscreen"></article>
+      </main>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

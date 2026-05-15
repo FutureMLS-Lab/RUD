@@ -1,0 +1,82 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{chen2021codex}
+\citation{yang2024sweagent}
+\citation{wang2024openhands}
+\citation{cognition2024devin}
+\citation{jimenez2024swebench}
+\citation{anthropic2025claude}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces System overview of \textsc  {Claudeloop}. The worker implements code via Claude Code's tools. After each iteration, changes are auto-committed and the evaluator runs deterministic tests followed by LLM judgment. On failure, suggestions are appended to the plan for the next iteration. Dotted line: success criteria also flow to the evaluator.}}{2}{figure.1}\protected@file@percent }
+\newlabel{fig:system}{{1}{2}{System overview of \textsc {Claudeloop}. The worker implements code via Claude Code's tools. After each iteration, changes are auto-committed and the evaluator runs deterministic tests followed by LLM judgment. On failure, suggestions are appended to the plan for the next iteration. Dotted line: success criteria also flow to the evaluator}{figure.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}System Design}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Worker Agent}{2}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Evaluator Agent (Hybrid Evaluation)}{2}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Backend System}{2}{subsection.2.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Task completion results across three case studies.}}{3}{table.1}\protected@file@percent }
+\newlabel{tab:results}{{1}{3}{Task completion results across three case studies}{table.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Performance benchmarks achieved by the generated calculus engine.}}{3}{table.2}\protected@file@percent }
+\newlabel{tab:benchmarks}{{2}{3}{Performance benchmarks achieved by the generated calculus engine}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Convergence and Termination}{3}{subsection.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Experiments}{3}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Case Study 1: Calculus Calculator (Single-Iteration)}{3}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Case Study 2: Paper Writing (Multi-Iteration)}{3}{subsection.3.2}\protected@file@percent }
+\citation{yang2024sweagent}
+\citation{wang2024openhands}
+\citation{gauthier2024aider}
+\citation{anthropic2025claude}
+\citation{jimenez2024swebench}
+\citation{yang2024sweagent}
+\citation{wang2024openhands}
+\citation{gauthier2024aider}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Convergence of the paper-writing task across 3 iterations, with per-iteration cost annotations. The green region indicates scores above the quality threshold.}}{4}{figure.2}\protected@file@percent }
+\newlabel{fig:convergence}{{2}{4}{Convergence of the paper-writing task across 3 iterations, with per-iteration cost annotations. The green region indicates scores above the quality threshold}{figure.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Cost breakdown by component for the calculus calculator task.}}{4}{table.3}\protected@file@percent }
+\newlabel{tab:cost}{{3}{4}{Cost breakdown by component for the calculus calculator task}{table.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Case Study 3: Bug Fixing (Multi-File)}{4}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Cost Analysis}{4}{subsection.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Framework Comparison}{4}{subsection.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6}Ablation: Hybrid Evaluation}{4}{subsection.3.6}\protected@file@percent }
+\citation{shinn2023reflexion}
+\citation{yao2023react}
+\citation{chase2022langchain}
+\citation{anthropic2025claude}
+\bibstyle{plainnat}
+\bibdata{references}
+\bibcite{anthropic2025claude}{{1}{2025}{{Anthropic}}{{}}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Token usage distribution for the calculus calculator task. Worker input tokens dominate (65\%) due to tool result ingestion. The evaluator uses $\sim $13\% of total tokens.}}{5}{figure.3}\protected@file@percent }
+\newlabel{fig:tokens}{{3}{5}{Token usage distribution for the calculus calculator task. Worker input tokens dominate (65\%) due to tool result ingestion. The evaluator uses $\sim $13\% of total tokens}{figure.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Comparison with existing agent frameworks. SWE-bench resolve rates are from published results (SWE-agent: GPT-4, OpenHands: CodeAct). $^\dagger $\textsc  {Claudeloop} targets iterative greenfield development; SWE-bench results are not directly comparable.}}{5}{table.4}\protected@file@percent }
+\newlabel{tab:comparison}{{4}{5}{Comparison with existing agent frameworks. SWE-bench resolve rates are from published results (SWE-agent: GPT-4, OpenHands: CodeAct). $^\dagger $\textsc {Claudeloop} targets iterative greenfield development; SWE-bench results are not directly comparable}{table.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Related Work}{5}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Conclusion}{5}{section.5}\protected@file@percent }
+\bibcite{chase2022langchain}{{2}{2022}{{Chase}}{{}}}
+\bibcite{chen2021codex}{{3}{2021}{{Chen et~al.}}{{Chen, Tworek, Jun, Yuan, et~al.}}}
+\bibcite{cognition2024devin}{{4}{2024}{{Cognition Labs}}{{}}}
+\bibcite{gauthier2024aider}{{5}{2024}{{Gauthier}}{{}}}
+\bibcite{jimenez2024swebench}{{6}{2024}{{Jimenez et~al.}}{{Jimenez, Yang, Wettig, Yao, Peri, and Narasimhan}}}
+\bibcite{shinn2023reflexion}{{7}{2023}{{Shinn et~al.}}{{Shinn, Cassano, Gopinath, Narasimhan, and Yao}}}
+\bibcite{wang2024openhands}{{8}{2024}{{Wang et~al.}}{{Wang, Ding, et~al.}}}
+\bibcite{yang2024sweagent}{{9}{2024}{{Yang et~al.}}{{Yang, Jimenez, Wettig, Liber, Narasimhan, and Press}}}
+\bibcite{yao2023react}{{10}{2023}{{Yao et~al.}}{{Yao, Zhao, Yu, Du, Shafran, Narasimhan, and Cao}}}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Ablation results on the paper-writing task comparing evaluation configurations. $^*$LLM incorrectly reported passing; 2 tests actually failed (citation count, page limit).}}{6}{table.5}\protected@file@percent }
+\newlabel{tab:ablation}{{5}{6}{Ablation results on the paper-writing task comparing evaluation configurations. $^*$LLM incorrectly reported passing; 2 tests actually failed (citation count, page limit)}{table.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Configuration and Usage}{6}{appendix.A}\protected@file@percent }
+\newlabel{app:config}{{A}{6}{Configuration and Usage}{appendix.A}{}}
+\gdef \@abspage@last{6}

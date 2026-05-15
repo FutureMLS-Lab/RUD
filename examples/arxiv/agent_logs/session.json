@@ -1,0 +1,22 @@
+{
+  "session_id": "840d39baeef5",
+  "status": "success",
+  "started_at": "2026-02-08T01:15:30.346424+00:00",
+  "updated_at": "2026-02-08T01:29:37.690759+00:00",
+  "completed_iteration": 1,
+  "total_cost": 5.8408717999999995,
+  "last_commit_hash": "78c703",
+  "iterations": [
+    {
+      "iteration": 1,
+      "worker_cost": 5.51335455,
+      "worker_duration": 790.168,
+      "worker_error": false,
+      "commit_hash": "78c703",
+      "eval_cost": 0.32751725,
+      "eval_duration": 56.232818365097046,
+      "eval_success": true,
+      "timestamp": "2026-02-08T01:29:37.690738+00:00"
+    }
+  ]
+}
