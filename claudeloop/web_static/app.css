@@ -55,13 +55,49 @@ code, .mono { font-family: var(--font-mono); font-size: 0.88em; background: var(
 .topbar {
   height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 16px;
   padding: 0 20px; background: rgba(255, 255, 255, 0.86); border-bottom: 1px solid rgba(232, 228, 218, 0.86);
-  position: sticky; top: 0; z-index: 10; box-shadow: 0 8px 28px rgba(31, 35, 48, 0.06); backdrop-filter: blur(18px);
+  position: sticky; top: 0; z-index: 20; box-shadow: 0 8px 28px rgba(31, 35, 48, 0.06); backdrop-filter: blur(18px);
 }
-.brand { display: flex; align-items: baseline; gap: 10px; }
-.brand__name { font-weight: 800; font-size: 1.14rem; letter-spacing: 0.02em; }
-.brand__tag { color: var(--text-faint); font-size: 0.85rem; }
+.topbar__left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.brand__name { font-weight: 800; font-size: 1.14rem; letter-spacing: 0.02em; white-space: nowrap; }
+.brand__tag { color: var(--text-faint); font-size: 0.85rem; white-space: nowrap; }
 .topbar__meta { display: flex; gap: 10px; align-items: center; font-size: 0.85rem; color: var(--text-dim); min-width: 0; }
-.topbar__meta span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar__meta-item { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.btn__label-short { display: none; }
+.icon-btn--menu {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 4px;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  background: transparent;
+  border-color: var(--border);
+}
+.icon-btn--menu .icon-btn__bar {
+  display: block;
+  width: 18px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--text);
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+body.sidebar-open .icon-btn--menu .icon-btn__bar:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+body.sidebar-open .icon-btn--menu .icon-btn__bar:nth-child(2) { opacity: 0; }
+body.sidebar-open .icon-btn--menu .icon-btn__bar:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 18;
+  background: rgba(15, 18, 32, 0.34);
+  backdrop-filter: blur(6px);
+  -webkit-tap-highlight-color: transparent;
+}
+.sidebar-backdrop[hidden] { display: none; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px; font: inherit; cursor: pointer;
@@ -417,12 +453,6 @@ select:focus-visible { outline: none; border-color: var(--border-focus); box-sha
 .markdown-workbench--interview {
   --markdown-panel-height: clamp(420px, calc(100vh - 420px), 660px);
 }
-@media (max-width: 1100px) {
-  .markdown-workbench {
-    grid-template-columns: 1fr;
-    --markdown-panel-height: 520px;
-  }
-}
 .markdown-pane {
   display: flex;
   flex-direction: column;
@@ -620,25 +650,180 @@ select:focus-visible { outline: none; border-color: var(--border-focus); box-sha
   width: 100%;
   max-width: none;
 }
-.terminal-card--log {
-  border-radius: 22px;
-}
+.terminal-card--log { border-radius: 22px; }
 .interview-markdown {
   margin-top: 18px;
   padding-top: 16px;
   border-top: 1px solid var(--border);
 }
+
+/* === Pane key strip (interview / ask / runner / eval) ===
+   Inspired by a physical keyboard: rounded keycaps with subtle depth,
+   a colourful primary Send key, square arrow caps grouped in a cluster,
+   and a red Ctrl-C for destructive interrupts. */
 .pane-actions {
   display: flex;
-  flex-wrap: nowrap;
-  gap: 6px;
-  margin-top: 8px;
+  flex-wrap: wrap;
   align-items: center;
-  overflow-x: auto;
-  white-space: nowrap;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 247, 243, 0.86));
+  box-shadow: var(--shadow-sm);
 }
-.pane-actions .tab-panel__hint { margin: 0 0 0 6px; flex: 0 0 auto; }
 .pane-actions .btn { flex: 0 0 auto; }
+.pane-actions__divider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+  margin: 0 2px;
+}
+.pane-actions__hint {
+  flex: 1 1 auto;
+  margin: 0 4px 0 6px;
+  color: var(--text-faint);
+  font-size: 0.78rem;
+  white-space: normal;
+}
+
+.key {
+  --key-bg-top: #ffffff;
+  --key-bg-bot: #f4f1ea;
+  --key-border: var(--border-strong);
+  --key-text: var(--text);
+  --key-shadow: rgba(214, 209, 195, 0.7);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 38px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--key-border);
+  border-bottom-width: 2px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, var(--key-bg-top), var(--key-bg-bot));
+  color: var(--key-text);
+  font: 600 0.86rem/1 var(--font-sans);
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 1px 0 var(--key-shadow);
+  transition: transform 0.08s ease, box-shadow 0.14s ease, background 0.14s, border-color 0.14s;
+}
+.key:hover {
+  --key-bg-bot: #faf7ee;
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 3px 0 var(--key-shadow),
+    0 6px 12px rgba(15, 23, 42, 0.06);
+}
+.key:active {
+  transform: translateY(1px);
+  border-bottom-width: 1px;
+  box-shadow:
+    inset 0 1px 2px rgba(15, 23, 42, 0.10),
+    0 0 0 var(--key-shadow);
+}
+.key:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 0 0 3px rgba(99, 102, 241, 0.18);
+}
+.key:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.key__icon {
+  display: inline-block;
+  min-width: 14px;
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+  color: var(--text-dim);
+  line-height: 1;
+}
+.key__label { font-size: 0.84rem; letter-spacing: 0.01em; }
+
+/* Square arrow caps grouped tightly together. */
+.key--arrow {
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  color: var(--text-dim);
+}
+.key--arrow:hover { color: var(--text); }
+.key-cluster {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 12px;
+  background: rgba(232, 228, 218, 0.55);
+  border: 1px solid rgba(214, 209, 195, 0.6);
+}
+.key-cluster .key {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 1px 0 rgba(214, 209, 195, 0.55);
+}
+
+/* Primary Send + Enter key – blue, slightly larger, with the airplane icon. */
+.key--send {
+  --key-bg-top: #818cf8;
+  --key-bg-bot: var(--accent);
+  --key-border: var(--accent);
+  --key-text: #fff;
+  --key-shadow: rgba(67, 56, 202, 0.55);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.14);
+  padding: 0 14px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.30),
+    0 2px 0 var(--key-shadow),
+    0 6px 14px rgba(79, 70, 229, 0.28);
+}
+.key--send:hover {
+  --key-bg-top: var(--accent);
+  --key-bg-bot: var(--accent-hover);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    0 4px 0 var(--key-shadow),
+    0 10px 20px rgba(79, 70, 229, 0.38);
+}
+.key--send .key__icon,
+.key--send .key__label { color: #fff; }
+.key--send svg { color: #fff; }
+
+/* Soft variant: lower-emphasis "Send" (without Enter) on runner / eval. */
+.key--send-soft {
+  --key-bg-top: rgba(99, 102, 241, 0.10);
+  --key-bg-bot: rgba(99, 102, 241, 0.18);
+  --key-border: rgba(99, 102, 241, 0.45);
+  --key-text: var(--accent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 1px 0 rgba(99, 102, 241, 0.20);
+}
+.key--send-soft:hover {
+  --key-bg-bot: rgba(99, 102, 241, 0.24);
+  color: var(--accent-hover);
+}
+
+/* Danger key (Ctrl-C). */
+.key--danger {
+  --key-bg-top: #fff5f5;
+  --key-bg-bot: #fecdd3;
+  --key-border: #fda4af;
+  --key-text: #be123c;
+  --key-shadow: rgba(190, 18, 60, 0.32);
+}
+.key--danger:hover { --key-bg-bot: #fbb6c2; }
+.key--danger .key__icon { color: #be123c; font-weight: 700; }
 .pane-target-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 7px 0; border-top: 1px solid var(--border); }
 .pane-target-row:first-of-type { border-top: 0; }
 .pane-target-row span { color: var(--text-dim); font-size: 0.85rem; }
@@ -836,8 +1021,6 @@ label { display: block; margin-top: 10px; font-size: 0.85rem; color: var(--text-
   .worker-buttons .btn { flex: 1 1 160px; }
 }
 
-.interview-out { white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.82rem; padding: 12px; background: var(--bg-elev-2); border-radius: var(--radius-sm); border: 1px solid var(--border); min-height: 80px; margin-bottom: 10px; }
-
 .status-ok { color: var(--good); }
 .status-bad { color: var(--bad); }
 
@@ -998,16 +1181,224 @@ label { display: block; margin-top: 10px; font-size: 0.85rem; color: var(--text-
 .markdown-preview--fullscreen h2 { font-size: 1.35rem; }
 .markdown-preview--fullscreen h3 { font-size: 1.1rem; }
 
+/* Markdown edit / preview switcher (mobile only) */
+.md-view-switch {
+  display: none;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(244, 242, 236, 0.78);
+}
+.md-view-tab {
+  flex: 1 1 0;
+  min-height: 38px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.92rem;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, box-shadow 0.14s;
+}
+.md-view-tab.is-active {
+  background: var(--bg-elev-1);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+@media (max-width: 1100px) {
+  /* Single-column markdown panes still keep both visible on tablet by default. */
+  .markdown-workbench {
+    grid-template-columns: 1fr;
+    --markdown-panel-height: 460px;
+  }
+}
+
 @media (max-width: 820px) {
   html, body { overflow: auto; }
-  .topbar { height: auto; min-height: 56px; flex-wrap: wrap; padding: 10px 12px; }
-  .topbar__meta { width: 100%; flex-wrap: wrap; }
-  .layout { height: auto; min-height: calc(100vh - 56px); flex-direction: column; }
-  .sidebar { width: 100%; border-right: 0; border-bottom: 1px solid var(--border); }
-  .main { padding: 12px; }
-  .task-view__header-row { flex-direction: column; }
-  .worker-controls { grid-template-columns: 1fr; }
-  .worker-buttons { justify-content: flex-start; flex-wrap: wrap; }
+  body { font-size: 14px; }
+
+  .icon-btn--menu { display: inline-flex; }
+  .topbar { height: 56px; padding: 0 12px; }
+  .topbar__left { gap: 8px; }
+  .brand__tag { display: none; }
+  .brand__name { font-size: 1rem; }
+  .topbar__meta { gap: 6px; }
+  .topbar__meta-item--secondary { display: none; }
+  .topbar__meta-item { max-width: 30vw; font-size: 0.78rem; }
+  .btn__label-full { display: none; }
+  .btn__label-short { display: inline; }
+  .topbar__meta .btn { min-height: 38px; padding: 7px 12px; }
+
+  .project-bar { padding: 6px 12px 8px; gap: 6px; }
+  .project-bar__hint { display: none; }
+  .project-bar__scroll { gap: 6px; -webkit-overflow-scrolling: touch; scroll-snap-type: x proximity; }
+  .project-toggle { scroll-snap-align: start; padding: 8px 10px 8px 14px; min-height: 40px; }
+  .project-bar__add { padding: 8px 12px; }
+
+  .layout {
+    height: auto;
+    min-height: calc(100vh - 56px);
+    flex-direction: column;
+    width: 100vw;
+    position: relative;
+  }
+
+  /* Drawer-style sidebar. */
+  .sidebar {
+    position: fixed;
+    top: 56px;
+    left: 0;
+    bottom: 0;
+    z-index: 19;
+    width: min(320px, 86vw);
+    border-right: 1px solid var(--border);
+    border-bottom: 0;
+    box-shadow: 12px 0 30px rgba(15, 18, 32, 0.18);
+    transform: translateX(-105%);
+    transition: transform 0.22s ease;
+    padding: 12px 12px 24px;
+  }
+  body.sidebar-open .sidebar { transform: translateX(0); }
+  body.sidebar-open .sidebar-backdrop { display: block; }
+  .tmux-list { max-height: 180px; }
+
+  .main { padding: 12px 12px 24px; }
+  .task-view__header { padding: 12px 14px; border-radius: 18px; margin-bottom: 12px; }
+  .task-view__title { font-size: 1.15rem; }
+  .task-view__header-row { flex-direction: column; align-items: stretch; }
+  .task-view__header-row .btn--danger { align-self: flex-end; min-height: 40px; }
+
+  /* Tab strip stays accessible: shrink padding, enable snap. */
+  .tabs {
+    margin: 0 -12px 12px;
+    padding: 6px 12px;
+    gap: 4px;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    background: rgba(244, 242, 236, 0.95);
+    position: sticky;
+    top: 56px;
+    z-index: 8;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+  .tab {
+    padding: 9px 14px;
+    font-size: 0.9rem;
+    scroll-snap-align: start;
+    min-height: 40px;
+  }
+
+  .tab-panel.active {
+    padding: 12px;
+    border-radius: 16px;
+  }
+
+  /* Show one markdown pane at a time on phone-sized screens. */
+  .markdown-workbench { gap: 10px; --markdown-panel-height: clamp(360px, 60vh, 540px); }
+  .md-view-switch { display: flex; }
+  .markdown-workbench--view-edit .markdown-pane--preview { display: none; }
+  .markdown-workbench--view-preview .markdown-pane:not(.markdown-pane--preview) { display: none; }
+  .markdown-pane { min-height: var(--markdown-panel-height); border-radius: 14px; }
+  .markdown-pane .editor,
+  .markdown-preview {
+    height: var(--markdown-panel-height);
+    min-height: var(--markdown-panel-height);
+    max-height: var(--markdown-panel-height);
+    padding: 14px;
+    font-size: 0.86rem;
+  }
+  .markdown-preview { padding: 14px 16px; }
+
+  .pane-input { min-height: 64px; font-size: 0.92rem; }
+  .pane-actions { padding: 6px 8px; gap: 5px; }
+  .pane-actions .btn { min-height: 40px; padding: 8px 14px; }
+  .pane-actions__hint { display: none; }
+  .pane-actions__divider { display: none; }
+  .key { height: 40px; min-width: 40px; padding: 0 10px; }
+  .key--arrow { width: 40px; min-width: 40px; }
+  .key__label { font-size: 0.82rem; }
+
+  .terminal-card { border-radius: 14px; box-shadow: 0 10px 22px rgba(15, 23, 42, 0.10); }
+  .pre-panel { font-size: 0.78rem; }
+  .pre-panel--pane { max-height: 56vh; min-height: 320px; }
+  .pre-panel--interview { max-height: 52vh; min-height: 320px; }
+  .pre-panel--log { max-height: 56vh; min-height: 320px; }
+
+
+  .tab-action-row,
+  .task-actions {
+    border-radius: 16px;
+    padding: 8px 10px;
+  }
+  .tab-action-row .btn,
+  .task-actions .btn { min-height: 40px; padding: 8px 14px; }
+  .action-hint { display: none; }
+
+  .worker-controls { grid-template-columns: 1fr; padding: 12px; border-radius: 16px; }
+  .worker-buttons { justify-content: flex-start; flex-wrap: wrap; gap: 6px; }
+  .worker-buttons .btn { min-height: 40px; flex: 1 1 auto; }
+  .worker-status-card { padding: 12px; border-radius: 16px; }
+  .worker-status-card__head { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .worker-status-card__round { font-size: 0.8rem; }
+  .worker-status-badge { font-size: 0.88rem; padding: 5px 12px; }
+
+  .modal-backdrop { padding: 12px; }
+  .modal-card { max-height: calc(100vh - 24px); border-radius: 18px; }
+  .modal-card__header { padding: 16px 16px 12px; }
+  .modal-card__body { padding: 14px 16px 4px; }
+  .modal-card__footer {
+    flex-wrap: wrap;
+    justify-content: stretch;
+    padding: 12px 16px 16px;
+    gap: 8px;
+  }
+  .modal-card__footer .btn { flex: 1 1 140px; min-height: 42px; }
+  .modal-card__footer .tab-panel__hint { flex: 1 1 100%; }
+
+  .preview-modal { padding: 0; }
+  .preview-modal__card {
+    width: 100%;
+    height: 100vh;
+    border-radius: 0;
+    border: 0;
+  }
+  .preview-modal__header { padding: 12px 14px; gap: 10px; }
+  .preview-modal__actions .btn { padding: 7px 10px; min-height: 38px; }
+  .preview-modal__body { padding: 14px; }
+  .markdown-preview--fullscreen { padding: 22px 18px; border-radius: 14px; font-size: 0.95rem; }
+
+  /* Honour iOS safe areas so nothing hides behind the home indicator. */
+  .main { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+  .sidebar { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 480px) {
+  .topbar__meta-item { display: none; }
+  .topbar__meta .btn { padding: 7px 10px; }
+  .tab { padding: 9px 12px; font-size: 0.86rem; }
+  .markdown-workbench { --markdown-panel-height: clamp(320px, 55vh, 480px); }
+  /* Hide text label on Enter/Esc keys; the icon alone is enough. */
+  .key:not(.key--send):not(.key--send-soft) .key__label { display: none; }
+  .key:not(.key--send):not(.key--send-soft) { padding: 0 10px; min-width: 40px; }
+}
+
+/* Touch-friendly tweaks: always make buttons easy to hit on coarse pointers. */
+@media (hover: none) and (pointer: coarse) {
+  .btn { min-height: 40px; }
+  .btn--sm { min-height: 36px; padding: 6px 12px; font-size: 0.86rem; }
+  .icon-btn { width: 40px; height: 40px; }
+  .task-list li { padding: 12px; }
+  .tmux-list li { padding: 10px 12px; }
+  .tab { min-height: 40px; }
+  .project-toggle__rm { min-width: 28px; height: 28px; }
 }
 
 @media print {

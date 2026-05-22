@@ -9,14 +9,15 @@ const FILES = {
 };
 
 const TABS = [
+  { id: 'ask', label: 'Ask' },
+  { id: 'interview', label: 'Interview' },
   { id: 'plan', label: 'PLAN.md' },
   { id: 'task', label: 'TASK_PROMPT.md' },
   { id: 'success', label: 'SUCCESS_CONDITION.md' },
-  { id: 'interview', label: 'Interview' },
-  { id: 'ask', label: 'Ask' },
   { id: 'panes', label: 'Runner / Evaluator' },
   { id: 'worker', label: 'Worker' },
 ];
+const DEFAULT_TAB = TABS[0].id;
 
 const STATE = {
   slug: null,
@@ -27,6 +28,10 @@ const STATE = {
   launchRootChildren: [],
   firstInterview: true,
   paneTimer: null,
+  activePanel: TABS[0].id,
+  previewCache: {},
+  previewDebounce: {},
+  sidebarOpen: false,
 };
 
 let PROJECT_DRAG_ID = '';
@@ -98,9 +103,24 @@ function showPanel(id) {
     p.classList.toggle('active', on);
     p.hidden = !on;
   });
-  if (['plan', 'task', 'success'].includes(id)) refreshTaskTemplates();
-  if (id === 'interview') refreshInterviewPreview();
-  if (id === 'ask') refreshAskPreview();
+  STATE.activePanel = id;
+  // Render the now-visible preview (cheap, cached) and defer any network
+  // fetches so the panel switch itself feels instant.
+  if (['plan', 'task', 'success', 'interview'].includes(id)) {
+    updateMarkdownPreview(id);
+  }
+  if (['plan', 'task', 'success'].includes(id)) deferIdle(refreshTaskTemplates);
+  if (id === 'interview') deferIdle(refreshInterviewPreview);
+  if (id === 'ask') deferIdle(refreshAskPreview);
+  if (id === 'panes') deferIdle(refreshPanePreview);
+}
+
+function deferIdle(fn) {
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(() => { try { fn(); } catch (_) {} }, { timeout: 200 });
+  } else {
+    setTimeout(() => { try { fn(); } catch (_) {} }, 0);
+  }
 }
 
 function buildTabs() {
@@ -109,12 +129,11 @@ function buildTabs() {
   for (const t of TABS) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'tab' + (t.id === 'plan' ? ' active' : '');
+    b.className = 'tab' + (t.id === DEFAULT_TAB ? ' active' : '');
     b.dataset.tab = t.id;
     b.textContent = t.label;
     b.addEventListener('click', () => {
       showPanel(t.id);
-      if (t.id === 'panes') refreshPanePreview();
     });
     nav.appendChild(b);
   }
@@ -401,10 +420,17 @@ async function loadTmuxSessions() {
   }
 }
 
+const HTML_ESCAPE_MAP = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+};
+
 function escapeHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, (ch) => HTML_ESCAPE_MAP[ch]);
 }
 
 function renderInlineMarkdown(text) {
@@ -544,23 +570,84 @@ function renderMarkdown(md) {
   return out.join('\n') || '<p class="empty-preview">Nothing to preview yet.</p>';
 }
 
-function updateMarkdownPreview(which) {
+function updateMarkdownPreview(which, force = false) {
   const editor = $(`#editor-${which}`);
   const preview = $(`#preview-${which}`);
   if (!editor || !preview) return;
-  preview.innerHTML = renderMarkdown(editor.value);
+  const text = editor.value || '';
+  if (!force && STATE.previewCache[which] === text) return;
+  STATE.previewCache[which] = text;
+  preview.innerHTML = renderMarkdown(text);
 }
 
-function updateAllMarkdownPreviews() {
-  ['plan', 'task', 'success', 'interview'].forEach(updateMarkdownPreview);
+// Refresh whichever markdown preview is currently visible.  Inactive panels
+// re-render lazily the next time `showPanel` activates them.
+function updateActiveMarkdownPreview() {
+  const which = STATE.activePanel;
+  if (['plan', 'task', 'success', 'interview'].includes(which)) {
+    updateMarkdownPreview(which);
+  }
+}
+
+function invalidatePreviewCache() {
+  STATE.previewCache = {};
 }
 
 function initMarkdownPreviews() {
   ['plan', 'task', 'success', 'interview'].forEach((which) => {
     const editor = $(`#editor-${which}`);
-    if (editor) editor.addEventListener('input', () => updateMarkdownPreview(which));
+    if (!editor) return;
+    editor.addEventListener('input', () => {
+      if (STATE.previewDebounce[which]) cancelAnimationFrame(STATE.previewDebounce[which]);
+      STATE.previewDebounce[which] = requestAnimationFrame(() => {
+        STATE.previewDebounce[which] = 0;
+        updateMarkdownPreview(which, true);
+      });
+    });
   });
-  updateAllMarkdownPreviews();
+  updateActiveMarkdownPreview();
+  injectMarkdownViewSwitchers();
+}
+
+function injectMarkdownViewSwitchers() {
+  document.querySelectorAll('.markdown-workbench').forEach((wb) => {
+    if (wb.querySelector('.md-view-switch')) return;
+    wb.classList.add('markdown-workbench--view-edit');
+    const bar = document.createElement('div');
+    bar.className = 'md-view-switch';
+    bar.setAttribute('role', 'tablist');
+    bar.setAttribute('aria-label', 'Editor or preview');
+    for (const view of ['edit', 'preview']) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'md-view-tab' + (view === 'edit' ? ' is-active' : '');
+      btn.dataset.view = view;
+      btn.setAttribute('role', 'tab');
+      btn.setAttribute('aria-selected', view === 'edit' ? 'true' : 'false');
+      btn.textContent = view === 'edit' ? 'Edit' : 'Preview';
+      btn.addEventListener('click', () => setMarkdownView(wb, view));
+      bar.appendChild(btn);
+    }
+    wb.insertBefore(bar, wb.firstChild);
+  });
+}
+
+function setMarkdownView(wb, view) {
+  wb.classList.toggle('markdown-workbench--view-edit', view === 'edit');
+  wb.classList.toggle('markdown-workbench--view-preview', view === 'preview');
+  wb.querySelectorAll('.md-view-tab').forEach((b) => {
+    const on = b.dataset.view === view;
+    b.classList.toggle('is-active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  if (view === 'preview') {
+    // Make sure the preview is fresh when switching to it; the input handler
+    // may have skipped rendering while the pane was hidden on narrow screens.
+    const which = STATE.activePanel;
+    if (['plan', 'task', 'success', 'interview'].includes(which)) {
+      updateMarkdownPreview(which, true);
+    }
+  }
 }
 
 function previewTitle(which) {
@@ -722,7 +809,10 @@ function renderTasksFromState() {
     li.addEventListener('click', () => {
       if (TASK_JUST_DRAGGED) return;
       if (STATE.slug === t.slug) clearTaskSelection();
-      else selectTask(t.slug);
+      else {
+        selectTask(t.slug);
+        if (isMobileViewport()) setSidebarOpen(false);
+      }
     });
     ul.appendChild(li);
   }
@@ -759,7 +849,8 @@ async function selectTask(slug) {
   $('#editor-task').value = d.templates[FILES.task] || '';
   $('#editor-success').value = d.templates[FILES.success] || '';
   $('#editor-interview').value = d.interview || '';
-  updateAllMarkdownPreviews();
+  invalidatePreviewCache();
+  updateActiveMarkdownPreview();
   $('#inp-interview-target').value = d.meta.tmux_interview_target || '';
   $('#inp-ask-target').value = d.meta.tmux_ask_target || '';
   $('#inp-runner-target').value = d.meta.tmux_runner_target || '';
@@ -771,10 +862,13 @@ async function selectTask(slug) {
   $('#interview-out').textContent = d.meta.tmux_interview_target
     ? 'Loading interview pane…'
     : (d.interview || 'Click Start deep-interview to launch the Claude Code interview pane.');
+  $('#ask-out').textContent = d.meta.tmux_ask_target
+    ? 'Loading ask pane…'
+    : 'Click Start ask pane to launch Claude Code for this task.';
   fillRepos(d.work_repos || [], d.meta.work_dirs || []);
   updateWorktreeStatusList(d.work_repos || []);
   buildTabs();
-  showPanel('plan');
+  showPanel(DEFAULT_TAB);
   await refreshLog();
   refreshInterviewPreview();
   refreshAskPreview();
@@ -809,11 +903,28 @@ async function deleteSelectedTask() {
 async function refreshTaskTemplates() {
   if (!STATE.slug) return;
   const d = await api('/api/tasks/' + encodeURIComponent(STATE.slug));
-  $('#editor-plan').value = d.templates[FILES.plan] || '';
-  $('#editor-task').value = d.templates[FILES.task] || '';
-  $('#editor-success').value = d.templates[FILES.success] || '';
-  $('#editor-interview').value = d.interview || '';
-  updateAllMarkdownPreviews();
+  const next = {
+    plan: d.templates[FILES.plan] || '',
+    task: d.templates[FILES.task] || '',
+    success: d.templates[FILES.success] || '',
+    interview: d.interview || '',
+  };
+  // Avoid clobbering the textarea (and breaking IME composition / scroll
+  // position) when nothing actually changed on disk, or when the user is
+  // mid-typing into that very editor.
+  const active = document.activeElement;
+  let changed = false;
+  for (const which of Object.keys(next)) {
+    const el = $(`#editor-${which}`);
+    if (!el) continue;
+    if (el === active) continue;
+    if (el.value !== next[which]) {
+      el.value = next[which];
+      STATE.previewCache[which] = null;
+      changed = true;
+    }
+  }
+  if (changed) updateActiveMarkdownPreview();
 }
 
 function fillRepos(workRepos, workDirs) {
@@ -877,8 +988,8 @@ async function refreshInterviewPreview() {
   const out = $('#interview-out');
   if (!target) return;
   try {
-    const d = await api('/api/tmux/capture?target=' + encodeURIComponent(target) + '&lines=160');
-    out.textContent = d.ok ? d.text : d.error || '(error)';
+    const d = await api('/api/tmux/capture?target=' + encodeURIComponent(target) + '&lines=200');
+    out.textContent = d.ok ? d.text : (d.error || '(error)');
   } catch (err) {
     out.textContent = err.message;
   }
@@ -889,8 +1000,8 @@ async function refreshAskPreview() {
   const out = $('#ask-out');
   if (!target) return;
   try {
-    const d = await api('/api/tmux/capture?target=' + encodeURIComponent(target) + '&lines=160');
-    out.textContent = d.ok ? d.text : d.error || '(error)';
+    const d = await api('/api/tmux/capture?target=' + encodeURIComponent(target) + '&lines=200');
+    out.textContent = d.ok ? d.text : (d.error || '(error)');
   } catch (err) {
     out.textContent = err.message;
   }
@@ -1188,6 +1299,35 @@ function resetCreateForm() {
   $('#new-task-status').textContent = '';
 }
 
+function isMobileViewport() {
+  return window.matchMedia('(max-width: 820px)').matches;
+}
+
+function setSidebarOpen(open) {
+  STATE.sidebarOpen = !!open;
+  document.body.classList.toggle('sidebar-open', STATE.sidebarOpen);
+  const toggle = document.getElementById('btn-sidebar-toggle');
+  if (toggle) toggle.setAttribute('aria-expanded', STATE.sidebarOpen ? 'true' : 'false');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  if (backdrop) backdrop.hidden = !STATE.sidebarOpen;
+}
+
+function toggleSidebar() {
+  setSidebarOpen(!STATE.sidebarOpen);
+}
+
+(function initSidebarToggle() {
+  const toggle = document.getElementById('btn-sidebar-toggle');
+  if (toggle) toggle.addEventListener('click', toggleSidebar);
+  const backdrop = document.getElementById('sidebar-backdrop');
+  if (backdrop) backdrop.addEventListener('click', () => setSidebarOpen(false));
+  // When resizing back to desktop, drop the drawer state so the sidebar shows
+  // in its normal docked position.
+  window.addEventListener('resize', () => {
+    if (!isMobileViewport() && STATE.sidebarOpen) setSidebarOpen(false);
+  });
+})();
+
 document.getElementById('btn-add-project').addEventListener('click', openAddProjectModal);
 document.getElementById('btn-add-project-close').addEventListener('click', closeAddProjectModal);
 document.getElementById('btn-add-project-cancel').addEventListener('click', closeAddProjectModal);
@@ -1411,7 +1551,7 @@ document.getElementById('btn-new-task').addEventListener('click', async () => {
     closeCreateModal();
     await loadTasks();
     await selectTask(meta.slug);
-    showPanel('plan');
+    showPanel(DEFAULT_TAB);
   } catch (e) {
     status.textContent = e.message;
   } finally {

@@ -353,7 +353,8 @@ def delete_task(project_root: Path, slug: str) -> tuple[bool, str]:
     try:
         shutil.rmtree(td)
     except OSError as exc:
-        return False, str(exc)
+        if not _sudo_rmtree(td, root):
+            return False, str(exc)
     _remove_task_from_order(project_root, slug)
     return True, ""
 
@@ -423,6 +424,28 @@ def _sudo_write_text(path: Path, content: str) -> bool:
         check=False,
     )
     return True
+
+
+def _sudo_rmtree(path: Path, allowed_root: Path) -> bool:
+    """Remove a task directory with sudo after re-checking the safety boundary."""
+    try:
+        target = path.resolve()
+        root = allowed_root.resolve()
+        target.relative_to(root)
+    except (OSError, ValueError):
+        return False
+    if target == root:
+        return False
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "rm", "-rf", "--", str(target)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def append_interview(project_root: Path, slug: str, role: str, text: str) -> None:

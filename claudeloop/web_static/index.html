@@ -8,16 +8,27 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <span class="brand__name">RUD CLAUDELOOP</span>
-      <span class="brand__tag">agent loop console</span>
+    <div class="topbar__left">
+      <button type="button" class="icon-btn icon-btn--menu" id="btn-sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+        <span class="icon-btn__bar"></span>
+        <span class="icon-btn__bar"></span>
+        <span class="icon-btn__bar"></span>
+      </button>
+      <div class="brand">
+        <span class="brand__name">RUD CLAUDELOOP</span>
+        <span class="brand__tag">agent loop console</span>
+      </div>
     </div>
     <div class="topbar__meta">
-      <span>Active root <code id="hdr-project">…</code></span>
-      <span>@skills <code id="hdr-skills">…</code></span>
-      <button type="button" class="btn btn--primary" id="btn-create-open">Create Task</button>
+      <span class="topbar__meta-item">Active root <code id="hdr-project">…</code></span>
+      <span class="topbar__meta-item topbar__meta-item--secondary">@skills <code id="hdr-skills">…</code></span>
+      <button type="button" class="btn btn--primary" id="btn-create-open">
+        <span class="btn__label-full">Create Task</span>
+        <span class="btn__label-short" aria-hidden="true">+ Task</span>
+      </button>
     </div>
   </header>
+  <div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
 
   <nav class="project-bar" aria-label="Registered repositories">
     <span class="project-bar__hint" id="project-bar-hint">Projects</span>
@@ -69,7 +80,7 @@
 
         <nav class="tabs" id="main-tabs" role="tablist"></nav>
 
-        <section class="tab-panel active" data-panel="plan" role="tabpanel">
+        <section class="tab-panel" data-panel="plan" role="tabpanel" hidden>
           <p class="tab-panel__hint">PLAN.md - progress and next steps.</p>
           <div class="markdown-workbench">
             <div class="markdown-pane">
@@ -145,15 +156,27 @@
           </div>
           <textarea id="interview-in" rows="3" class="pane-input" placeholder="Answer the deep-interview questions..."></textarea>
           <div class="pane-actions" data-pane="interview">
-            <button type="button" class="btn btn--primary" id="btn-interview-send">Send + Enter</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Enter">Enter</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Up">↑</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Down">↓</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Left">←</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Right">→</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Escape">Esc</button>
-            <button type="button" class="btn btn--danger btn--sm" data-key="C-c">Ctrl-C</button>
-            <span class="tab-panel__hint">Enter inserts a newline. Click Send + Enter to submit; Claude uses effort=max.</span>
+            <button type="button" class="key key--send" id="btn-interview-send" title="Send and submit">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M3.4 20.4 21.85 12 3.4 3.6l.01 7.07L17 12 3.41 13.33z" fill="currentColor"/></svg>
+              <span class="key__label">Send + Enter</span>
+            </button>
+            <span class="pane-actions__divider" aria-hidden="true"></span>
+            <button type="button" class="key" data-key="Enter" title="Enter">
+              <span class="key__icon">⏎</span><span class="key__label">Enter</span>
+            </button>
+            <div class="key-cluster" role="group" aria-label="Arrow keys">
+              <button type="button" class="key key--arrow" data-key="Up" aria-label="Up arrow">↑</button>
+              <button type="button" class="key key--arrow" data-key="Down" aria-label="Down arrow">↓</button>
+              <button type="button" class="key key--arrow" data-key="Left" aria-label="Left arrow">←</button>
+              <button type="button" class="key key--arrow" data-key="Right" aria-label="Right arrow">→</button>
+            </div>
+            <button type="button" class="key" data-key="Escape" title="Escape">
+              <span class="key__icon">⎋</span><span class="key__label">Esc</span>
+            </button>
+            <button type="button" class="key key--danger" data-key="C-c" title="Ctrl + C (interrupt)">
+              <span class="key__icon">⌃C</span>
+            </button>
+            <span class="pane-actions__hint">Enter inserts a newline. Click Send + Enter to submit; Claude uses effort=max.</span>
           </div>
           <div class="interview-markdown">
             <p class="tab-panel__hint">INTERVIEW.md - notes and decisions from the deep-interview.</p>
@@ -170,7 +193,7 @@
           </div>
         </section>
 
-        <section class="tab-panel" data-panel="ask" role="tabpanel" hidden>
+        <section class="tab-panel active" data-panel="ask" role="tabpanel">
           <p class="tab-panel__hint">Start an on-demand Claude Opus ask pane for this task.</p>
           <input type="hidden" id="inp-ask-target" />
           <div class="tab-action-row">
@@ -194,15 +217,27 @@
           </div>
           <textarea id="ask-in" rows="3" class="pane-input" placeholder="Ask about code changes, current run status, logs, or next steps..."></textarea>
           <div class="pane-actions" data-pane="ask">
-            <button type="button" class="btn btn--primary" id="btn-ask-send">Send + Enter</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Enter">Enter</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Up">↑</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Down">↓</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Left">←</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Right">→</button>
-            <button type="button" class="btn btn--ghost btn--sm" data-key="Escape">Esc</button>
-            <button type="button" class="btn btn--danger btn--sm" data-key="C-c">Ctrl-C</button>
-            <span class="tab-panel__hint">Enter inserts a newline. Click Send + Enter to submit.</span>
+            <button type="button" class="key key--send" id="btn-ask-send" title="Send and submit">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M3.4 20.4 21.85 12 3.4 3.6l.01 7.07L17 12 3.41 13.33z" fill="currentColor"/></svg>
+              <span class="key__label">Send + Enter</span>
+            </button>
+            <span class="pane-actions__divider" aria-hidden="true"></span>
+            <button type="button" class="key" data-key="Enter" title="Enter">
+              <span class="key__icon">⏎</span><span class="key__label">Enter</span>
+            </button>
+            <div class="key-cluster" role="group" aria-label="Arrow keys">
+              <button type="button" class="key key--arrow" data-key="Up" aria-label="Up arrow">↑</button>
+              <button type="button" class="key key--arrow" data-key="Down" aria-label="Down arrow">↓</button>
+              <button type="button" class="key key--arrow" data-key="Left" aria-label="Left arrow">←</button>
+              <button type="button" class="key key--arrow" data-key="Right" aria-label="Right arrow">→</button>
+            </div>
+            <button type="button" class="key" data-key="Escape" title="Escape">
+              <span class="key__icon">⎋</span><span class="key__label">Esc</span>
+            </button>
+            <button type="button" class="key key--danger" data-key="C-c" title="Ctrl + C (interrupt)">
+              <span class="key__icon">⌃C</span>
+            </button>
+            <span class="pane-actions__hint">Enter inserts a newline. Click Send + Enter to submit.</span>
           </div>
         </section>
 
@@ -230,16 +265,30 @@
               <pre class="pre-panel pre-panel--pane" id="pre-runner">(not bound)</pre>
               <textarea id="pane-runner-input" class="pane-input" rows="2" placeholder="Text to send to the runner pane..."></textarea>
               <div class="pane-actions" data-pane="runner">
-                <button type="button" class="btn btn--primary btn--sm" data-send-text="runner">Send</button>
-                <button type="button" class="btn btn--sm" data-send-text-enter="runner">Send + Enter</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Enter">Enter</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Up">↑</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Down">↓</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Left">←</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Right">→</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Escape">Esc</button>
-                <button type="button" class="btn btn--danger btn--sm" data-key="C-c">Ctrl-C</button>
-                <span class="tab-panel__hint">Enter inserts a newline. Click Send or Send + Enter to submit.</span>
+                <button type="button" class="key key--send-soft" data-send-text="runner" title="Type text into pane (no Enter)">
+                  <span class="key__label">Send</span>
+                </button>
+                <button type="button" class="key key--send" data-send-text-enter="runner" title="Type text and submit">
+                  <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M3.4 20.4 21.85 12 3.4 3.6l.01 7.07L17 12 3.41 13.33z" fill="currentColor"/></svg>
+                  <span class="key__label">Send + Enter</span>
+                </button>
+                <span class="pane-actions__divider" aria-hidden="true"></span>
+                <button type="button" class="key" data-key="Enter" title="Enter">
+                  <span class="key__icon">⏎</span><span class="key__label">Enter</span>
+                </button>
+                <div class="key-cluster" role="group" aria-label="Arrow keys">
+                  <button type="button" class="key key--arrow" data-key="Up" aria-label="Up arrow">↑</button>
+                  <button type="button" class="key key--arrow" data-key="Down" aria-label="Down arrow">↓</button>
+                  <button type="button" class="key key--arrow" data-key="Left" aria-label="Left arrow">←</button>
+                  <button type="button" class="key key--arrow" data-key="Right" aria-label="Right arrow">→</button>
+                </div>
+                <button type="button" class="key" data-key="Escape" title="Escape">
+                  <span class="key__icon">⎋</span><span class="key__label">Esc</span>
+                </button>
+                <button type="button" class="key key--danger" data-key="C-c" title="Ctrl + C (interrupt)">
+                  <span class="key__icon">⌃C</span>
+                </button>
+                <span class="pane-actions__hint">Enter inserts a newline. Click Send or Send + Enter to submit.</span>
               </div>
             </div>
             <div class="pane-card terminal-card">
@@ -250,16 +299,30 @@
               <pre class="pre-panel pre-panel--pane" id="pre-eval">(not bound)</pre>
               <textarea id="pane-eval-input" class="pane-input" rows="2" placeholder="Text to send to the evaluator pane..."></textarea>
               <div class="pane-actions" data-pane="eval">
-                <button type="button" class="btn btn--primary btn--sm" data-send-text="eval">Send</button>
-                <button type="button" class="btn btn--sm" data-send-text-enter="eval">Send + Enter</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Enter">Enter</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Up">↑</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Down">↓</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Left">←</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Right">→</button>
-                <button type="button" class="btn btn--ghost btn--sm" data-key="Escape">Esc</button>
-                <button type="button" class="btn btn--danger btn--sm" data-key="C-c">Ctrl-C</button>
-                <span class="tab-panel__hint">Enter inserts a newline. Click Send or Send + Enter to submit.</span>
+                <button type="button" class="key key--send-soft" data-send-text="eval" title="Type text into pane (no Enter)">
+                  <span class="key__label">Send</span>
+                </button>
+                <button type="button" class="key key--send" data-send-text-enter="eval" title="Type text and submit">
+                  <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M3.4 20.4 21.85 12 3.4 3.6l.01 7.07L17 12 3.41 13.33z" fill="currentColor"/></svg>
+                  <span class="key__label">Send + Enter</span>
+                </button>
+                <span class="pane-actions__divider" aria-hidden="true"></span>
+                <button type="button" class="key" data-key="Enter" title="Enter">
+                  <span class="key__icon">⏎</span><span class="key__label">Enter</span>
+                </button>
+                <div class="key-cluster" role="group" aria-label="Arrow keys">
+                  <button type="button" class="key key--arrow" data-key="Up" aria-label="Up arrow">↑</button>
+                  <button type="button" class="key key--arrow" data-key="Down" aria-label="Down arrow">↓</button>
+                  <button type="button" class="key key--arrow" data-key="Left" aria-label="Left arrow">←</button>
+                  <button type="button" class="key key--arrow" data-key="Right" aria-label="Right arrow">→</button>
+                </div>
+                <button type="button" class="key" data-key="Escape" title="Escape">
+                  <span class="key__icon">⎋</span><span class="key__label">Esc</span>
+                </button>
+                <button type="button" class="key key--danger" data-key="C-c" title="Ctrl + C (interrupt)">
+                  <span class="key__icon">⌃C</span>
+                </button>
+                <span class="pane-actions__hint">Enter inserts a newline. Click Send or Send + Enter to submit.</span>
               </div>
             </div>
           </div>

@@ -5,11 +5,13 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import claudeloop.rud_task as rud_task
 from claudeloop.rud_task import (
     PLAN,
     SUCCESS_CONDITION,
     TASK_PROMPT,
     create_task,
+    delete_task,
     list_work_repo_keys,
     path_under_task,
     prepare_worktree,
@@ -120,3 +122,23 @@ def test_auto_nested_worktrees_on_create(tmp_path: Path) -> None:
 def test_write_template_rejects_bad_name(tmp_path: Path) -> None:
     meta = create_task(tmp_path, "t", "goal", skills_path=None, work_dirs=None, auto_worktrees=False)
     assert write_template(tmp_path, meta.slug, "evil.md", "x") is False
+
+
+def test_delete_task_falls_back_to_sudo(monkeypatch, tmp_path: Path) -> None:
+    meta = create_task(tmp_path, "sudo delete", "goal", skills_path=None, work_dirs=None, auto_worktrees=False)
+    calls: list[list[str]] = []
+
+    def fake_rmtree(path: Path) -> None:
+        raise PermissionError(13, "Permission denied", str(path / "work" / "__pycache__"))
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(rud_task.shutil, "rmtree", fake_rmtree)
+    monkeypatch.setattr(rud_task.subprocess, "run", fake_run)
+
+    ok, err = delete_task(tmp_path, meta.slug)
+
+    assert ok, err
+    assert calls == [["sudo", "-n", "rm", "-rf", "--", str(task_root(tmp_path, meta.slug))]]
