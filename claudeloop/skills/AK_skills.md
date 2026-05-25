@@ -1,3 +1,22 @@
+# K8S
+
+请你先整理组织下我们的plan,task,success，现在写的比较混乱，保留总结重要内容。然后记得加入一下内容：
+
+- Use the task worktree for experiments and PR review. If the worktree already exists, reuse it.
+- Prefer Kubernetes for tests/evals/training so the local machine stays free.
+- Use pods/jobs/nodes to scale experiments, and clean up old completed or failed jobs when done.
+- Save all results, logs, configs, and notes under the task directory.
+- Use wandb for run tracking; the user is already logged in.
+- Use the existing `HF_TOKEN` 
+- Use `/shared/huggingface` for Hugging Face cache (`HF_HOME`, `TRANSFORMERS_CACHE`, `HF_DATASETS_CACHE`)! DO NOT USE ~/.cache/huggingface!
+- some node NCCL/IB/GPU might be inhealthy, the cluster has these information, please be careful to check
+- branch/worktree name use zhongzhu/xxxx as the name, also for PR, etc.
+- don't create PR, review by your self; just leave everything in the local worktree.
+- for review, list review like "- code line xxx comment review xxx" simple & clean
+- don't make author / co-author as claude / cursor or ai agent.
+- 如果在claudeloop文件夹中 记得更新文件夹最外面的 PLAN TASK SUCESS 三个markdown；主要是PLAN 我们会根据PLAN检查进度。
+- 如果本机local 有free GPU 没有人使用的 你可以尝试使用。
+
 # CLAUDE.md
 
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.

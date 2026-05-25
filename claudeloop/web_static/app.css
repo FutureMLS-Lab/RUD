@@ -657,7 +657,7 @@ select:focus-visible { outline: none; border-color: var(--border-focus); box-sha
   border-top: 1px solid var(--border);
 }
 
-/* === Pane key strip (interview / ask / runner / eval) ===
+/* === Pane key strip (interview / runner / eval) ===
    Inspired by a physical keyboard: rounded keycaps with subtle depth,
    a colourful primary Send key, square arrow caps grouped in a cluster,
    and a red Ctrl-C for destructive interrupts. */

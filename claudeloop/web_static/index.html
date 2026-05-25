@@ -43,7 +43,7 @@
           <h2 class="sidebar__heading">tmux</h2>
           <button type="button" class="btn btn--ghost btn--sm" id="btn-tmux-refresh">Refresh</button>
         </div>
-        <p class="sidebar__hint">Claudeloop sessions for the <strong>selected</strong> project (worker / interview / ask).</p>
+        <p class="sidebar__hint">Claudeloop sessions for the <strong>selected</strong> project (worker / interview).</p>
         <ul class="tmux-list" id="tmux-sessions"></ul>
       </section>
 
@@ -132,7 +132,7 @@
           </div>
         </section>
 
-        <section class="tab-panel" data-panel="interview" role="tabpanel" hidden>
+        <section class="tab-panel active" data-panel="interview" role="tabpanel">
           <p class="tab-panel__hint">Start a dedicated Claude Code interview pane, answer questions in the web UI, and let it finalize the three task files.</p>
           <input type="hidden" id="inp-interview-target" />
           <div class="tab-action-row">
@@ -190,54 +190,6 @@
                 <div id="preview-interview" class="markdown-preview"></div>
               </div>
             </div>
-          </div>
-        </section>
-
-        <section class="tab-panel active" data-panel="ask" role="tabpanel">
-          <p class="tab-panel__hint">Start an on-demand Claude Opus ask pane for this task.</p>
-          <input type="hidden" id="inp-ask-target" />
-          <div class="tab-action-row">
-            <button type="button" class="btn btn--primary" id="btn-ask-start">Start ask pane</button>
-            <button type="button" class="btn btn--danger" id="btn-ask-stop">Stop ask pane</button>
-            <span class="action-hint">Runs in `.RUD/&lt;task&gt;/work/` with effort=max.</span>
-          </div>
-          <div class="pane-card pane-card--compact">
-            <h4>Ask pane</h4>
-            <div class="pane-target-row">
-              <span>Target</span>
-              <code id="ask-target-label">Not started</code>
-            </div>
-          </div>
-          <div class="pane-card terminal-card terminal-card--interview">
-            <div class="terminal-card__bar">
-              <div class="terminal-card__dots"><span></span><span></span><span></span></div>
-              <h4>Ask Terminal</h4>
-            </div>
-            <pre class="pre-panel pre-panel--interview" id="ask-out">Click Start ask pane to launch Claude Code for this task.</pre>
-          </div>
-          <textarea id="ask-in" rows="3" class="pane-input" placeholder="Ask about code changes, current run status, logs, or next steps..."></textarea>
-          <div class="pane-actions" data-pane="ask">
-            <button type="button" class="key key--send" id="btn-ask-send" title="Send and submit">
-              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M3.4 20.4 21.85 12 3.4 3.6l.01 7.07L17 12 3.41 13.33z" fill="currentColor"/></svg>
-              <span class="key__label">Send + Enter</span>
-            </button>
-            <span class="pane-actions__divider" aria-hidden="true"></span>
-            <button type="button" class="key" data-key="Enter" title="Enter">
-              <span class="key__icon">⏎</span><span class="key__label">Enter</span>
-            </button>
-            <div class="key-cluster" role="group" aria-label="Arrow keys">
-              <button type="button" class="key key--arrow" data-key="Up" aria-label="Up arrow">↑</button>
-              <button type="button" class="key key--arrow" data-key="Down" aria-label="Down arrow">↓</button>
-              <button type="button" class="key key--arrow" data-key="Left" aria-label="Left arrow">←</button>
-              <button type="button" class="key key--arrow" data-key="Right" aria-label="Right arrow">→</button>
-            </div>
-            <button type="button" class="key" data-key="Escape" title="Escape">
-              <span class="key__icon">⎋</span><span class="key__label">Esc</span>
-            </button>
-            <button type="button" class="key key--danger" data-key="C-c" title="Ctrl + C (interrupt)">
-              <span class="key__icon">⌃C</span>
-            </button>
-            <span class="pane-actions__hint">Enter inserts a newline. Click Send + Enter to submit.</span>
           </div>
         </section>
 

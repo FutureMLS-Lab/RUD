@@ -9,7 +9,6 @@ const FILES = {
 };
 
 const TABS = [
-  { id: 'ask', label: 'Ask' },
   { id: 'interview', label: 'Interview' },
   { id: 'plan', label: 'PLAN.md' },
   { id: 'task', label: 'TASK_PROMPT.md' },
@@ -111,7 +110,6 @@ function showPanel(id) {
   }
   if (['plan', 'task', 'success'].includes(id)) deferIdle(refreshTaskTemplates);
   if (id === 'interview') deferIdle(refreshInterviewPreview);
-  if (id === 'ask') deferIdle(refreshAskPreview);
   if (id === 'panes') deferIdle(refreshPanePreview);
 }
 
@@ -852,26 +850,20 @@ async function selectTask(slug) {
   invalidatePreviewCache();
   updateActiveMarkdownPreview();
   $('#inp-interview-target').value = d.meta.tmux_interview_target || '';
-  $('#inp-ask-target').value = d.meta.tmux_ask_target || '';
   $('#inp-runner-target').value = d.meta.tmux_runner_target || '';
   $('#inp-eval-target').value = d.meta.tmux_evaluator_target || '';
   $('#interview-target-label').textContent = d.meta.tmux_interview_target || 'Not started';
-  $('#ask-target-label').textContent = d.meta.tmux_ask_target || 'Not started';
   $('#runner-target-label').textContent = d.meta.tmux_runner_target || 'Not started';
   $('#eval-target-label').textContent = d.meta.tmux_evaluator_target || 'Not started';
   $('#interview-out').textContent = d.meta.tmux_interview_target
     ? 'Loading interview pane…'
     : (d.interview || 'Click Start deep-interview to launch the Claude Code interview pane.');
-  $('#ask-out').textContent = d.meta.tmux_ask_target
-    ? 'Loading ask pane…'
-    : 'Click Start ask pane to launch Claude Code for this task.';
   fillRepos(d.work_repos || [], d.meta.work_dirs || []);
   updateWorktreeStatusList(d.work_repos || []);
   buildTabs();
   showPanel(DEFAULT_TAB);
   await refreshLog();
   refreshInterviewPreview();
-  refreshAskPreview();
   refreshPanePreview();
   startPanePolling();
 }
@@ -928,7 +920,7 @@ async function refreshTaskTemplates() {
 }
 
 function fillRepos(workRepos, workDirs) {
-  // Worktree list is displayed in the status row; worker/ask run from the work root.
+  // Worktree list is displayed in the status row; worker runs from the work root.
 }
 
 function updateWorktreeStatusList(workRepos) {
@@ -995,29 +987,15 @@ async function refreshInterviewPreview() {
   }
 }
 
-async function refreshAskPreview() {
-  const target = $('#inp-ask-target').value.trim();
-  const out = $('#ask-out');
-  if (!target) return;
-  try {
-    const d = await api('/api/tmux/capture?target=' + encodeURIComponent(target) + '&lines=200');
-    out.textContent = d.ok ? d.text : (d.error || '(error)');
-  } catch (err) {
-    out.textContent = err.message;
-  }
-}
-
 function paneTarget(which) {
   if (which === 'runner') return $('#inp-runner-target').value.trim();
   if (which === 'eval') return $('#inp-eval-target').value.trim();
-  if (which === 'ask') return $('#inp-ask-target').value.trim();
   return $('#inp-interview-target').value.trim();
 }
 
 function paneInput(which) {
   if (which === 'runner') return $('#pane-runner-input');
   if (which === 'eval') return $('#pane-eval-input');
-  if (which === 'ask') return $('#ask-in');
   return $('#interview-in');
 }
 
@@ -1036,7 +1014,6 @@ async function sendPaneText(which, submit = false) {
   });
   input.value = '';
   if (which === 'interview') await refreshInterviewPreview();
-  else if (which === 'ask') await refreshAskPreview();
   else await refreshPanePreview();
 }
 
@@ -1051,7 +1028,6 @@ async function sendPaneKey(which, key) {
     body: JSON.stringify({ target, key }),
   });
   if (which === 'interview') await refreshInterviewPreview();
-  else if (which === 'ask') await refreshAskPreview();
   else await refreshPanePreview();
 }
 
@@ -1066,8 +1042,6 @@ function startPanePolling() {
       refreshInterviewPreview();
       refreshTaskTemplates();
     }
-    const ask = document.querySelector('.tab-panel[data-panel="ask"]');
-    if (ask && !ask.hidden) refreshAskPreview();
     const worker = document.querySelector('.tab-panel[data-panel="worker"]');
     if (worker && !worker.hidden) refreshLog();
   }, 4000);
@@ -1405,42 +1379,6 @@ document.getElementById('btn-interview-stop').addEventListener('click', async ()
 document.getElementById('btn-interview-send').addEventListener('click', async () => {
   if (!STATE.slug) return;
   await sendPaneText('interview', true);
-});
-
-async function startAskPane() {
-  if (!STATE.slug) return;
-  showPanel('ask');
-  $('#ask-out').textContent = 'Starting Claude Opus ask pane…\nContext prompt will be pasted automatically in about 5 seconds.';
-  const r = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/ask/start', {
-    method: 'POST',
-    body: JSON.stringify({ repo: WORKER_REPO }),
-  });
-  $('#inp-ask-target').value = r.target || '';
-  $('#ask-target-label').textContent = r.target || 'Not started';
-  await refreshAskPreview();
-  setTimeout(refreshAskPreview, 6500);
-  setTimeout(refreshAskPreview, 10000);
-}
-
-document.getElementById('btn-ask-start').addEventListener('click', async () => {
-  await startAskPane();
-});
-
-document.getElementById('btn-ask-stop').addEventListener('click', async () => {
-  if (!STATE.slug) return;
-  if (!confirm('Stop ask pane? This will kill the associated tmux session.')) return;
-  const r = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/ask/stop', {
-    method: 'POST',
-    body: '{}',
-  });
-  $('#inp-ask-target').value = '';
-  $('#ask-target-label').textContent = 'Not started';
-  $('#ask-out').textContent = `Stopped ${r.tmux_session}\n${r.tmux_message}`;
-});
-
-document.getElementById('btn-ask-send').addEventListener('click', async () => {
-  if (!STATE.slug) return;
-  await sendPaneText('ask', true);
 });
 
 document.querySelectorAll('[data-send-text]').forEach((btn) => {
