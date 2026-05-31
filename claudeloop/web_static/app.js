@@ -1,27 +1,37 @@
 /**
  * claudeloop web client.
  *
- * Three tabs now: Interview, PLAN.md, NOTES.md. All worker/runner/evaluator
- * and worktree machinery has been removed from the backend; this client
- * only talks to /api/projects, /api/tasks, /api/tmux/*, /api/interview/*,
- * and template GET/PUT for PLAN.md / NOTES.md.
+ * Two top-level tabs per task: Claude, PLAN.md. The Claude tab also embeds
+ * a live read-only view of PLAN.md so you can watch it grow while the
+ * tmux pane is busy. The PLAN.md tab is the editable surface.
+ *
+ * Project-scoped NOTES.md is reached via the sidebar's Notes button.
+ *
+ * The client talks to /api/projects, /api/tasks, /api/tmux/*,
+ * /api/tasks/<slug>/(interview|claude)/*, and template GET/PUT for
+ * PLAN.md.
  */
 
 const FILES = {
   plan: 'PLAN.md',
-  interview: 'INTERVIEW.md',
 };
 
-// "claude" is the tmux pane tab (with the live claude session);
-// "interview" is the INTERVIEW.md markdown editor that sits inside it.
-// Both belong to the active task.
+// "claude" is the tmux pane tab; the "interview" markdown panel embedded
+// inside it shows the same PLAN.md (read-only) as the dedicated "plan"
+// editor. Both refresh from /api/tasks/<slug>.templates['PLAN.md'].
 const MARKDOWN_PANELS = ['interview', 'plan'];
 
+// Tab labels are computed per task so the agent pane name matches the
+// task's agent setting (Claude / Codex).
 const TABS = [
-  { id: 'claude', label: 'Claude' },
+  { id: 'claude', label: 'Claude', getLabel: (meta) => agentLabel(meta?.agent) },
   { id: 'plan', label: 'PLAN.md' },
 ];
 const DEFAULT_TAB = TABS[0].id;
+
+const AGENT_LABELS = { claude: 'Claude', codex: 'Codex' };
+function agentLabel(name) { return AGENT_LABELS[(name || '').toLowerCase()] || 'Claude'; }
+function normalizeAgent(name) { return AGENT_LABELS[(name || '').toLowerCase()] ? name.toLowerCase() : 'claude'; }
 
 const STATE = {
   slug: null,
@@ -39,6 +49,12 @@ const STATE = {
   notesSaving: false,
   planDirty: false,
   taskFilter: '',
+  // Embedded read-only markdown viewer on the Claude tab. The picker
+  // lets the user flip between any top-level *.md file in the task root;
+  // PLAN.md is the default.
+  interviewMdFile: FILES.plan,
+  interviewMdFiles: [],
+  interviewMdContents: {},
 };
 
 let PROJECT_DRAG_ID = '';
@@ -99,8 +115,13 @@ function showPanel(id) {
     updateMarkdownPreview('plan');
     deferIdle(refreshTaskTemplates);
   } else if (id === 'claude') {
-    // The Claude tab embeds the INTERVIEW.md preview at the bottom.
+    // The Claude tab embeds a read-only viewer for any top-level *.md
+    // file in the task root - defaults to PLAN.md.
     updateMarkdownPreview('interview');
+    // Show the most-recent tmux output (terminal-style) the moment the
+    // user lands on this tab. The element was previously hidden so its
+    // scrollTop is stale (0 = top of buffer) - we want the bottom.
+    scrollTmuxOutputToBottom();
     deferIdle(refreshInterviewPreview);
     deferIdle(refreshTaskTemplates);
     deferIdle(refreshClaudeSessions);
@@ -115,7 +136,7 @@ function deferIdle(fn) {
   }
 }
 
-function buildTabs() {
+function buildTabs(meta) {
   const nav = $('#main-tabs');
   nav.innerHTML = '';
   for (const t of TABS) {
@@ -123,7 +144,7 @@ function buildTabs() {
     b.type = 'button';
     b.className = 'tab' + (t.id === DEFAULT_TAB ? ' active' : '');
     b.dataset.tab = t.id;
-    b.textContent = t.label;
+    b.textContent = typeof t.getLabel === 'function' ? t.getLabel(meta) : t.label;
     b.addEventListener('click', () => showPanel(t.id));
     nav.appendChild(b);
   }
@@ -611,9 +632,107 @@ function setMarkdownView(wb, view) {
 }
 
 function previewTitle(which) {
-  const names = { plan: 'PLAN.md', notes: 'NOTES.md', interview: 'INTERVIEW.md' };
+  // "plan" is always PLAN.md (its dedicated editor tab).
+  // "interview" reflects whichever top-level *.md file the user picked
+  // in the embedded read-only viewer on the Claude tab.
+  const names = {
+    plan: 'PLAN.md',
+    notes: 'NOTES.md',
+    interview: STATE.interviewMdFile || 'PLAN.md',
+  };
   const taskTitle = $('#task-title')?.textContent?.trim() || 'Task';
   return `${names[which] || 'Preview'} · ${taskTitle}`;
+}
+
+// ===== Embedded markdown picker (Claude tab) =====
+
+// Apply a new task payload's file list + contents to STATE, refresh the
+// <select> options, and load the currently selected file into the embed.
+// Falls back to PLAN.md when the previous selection has disappeared.
+function applyInterviewMdPayload(d) {
+  const planText = d.templates && d.templates[FILES.plan] != null
+    ? d.templates[FILES.plan]
+    : '';
+  let files = Array.isArray(d.task_markdown_files) && d.task_markdown_files.length
+    ? d.task_markdown_files.slice()
+    : [FILES.plan];
+  if (!files.includes(FILES.plan)) files = [FILES.plan, ...files];
+  const contents = {};
+  for (const name of files) {
+    if (d.templates && Object.prototype.hasOwnProperty.call(d.templates, name)) {
+      contents[name] = d.templates[name];
+    } else if (name === FILES.plan) {
+      contents[name] = planText;
+    } else {
+      contents[name] = '';
+    }
+  }
+  STATE.interviewMdFiles = files;
+  STATE.interviewMdContents = contents;
+  if (!files.includes(STATE.interviewMdFile)) {
+    STATE.interviewMdFile = FILES.plan;
+  }
+  populateInterviewMdSelect();
+  loadInterviewMdIntoEditor();
+}
+
+function populateInterviewMdSelect() {
+  const sel = document.getElementById('interview-md-select');
+  if (!sel) return;
+  const current = STATE.interviewMdFile;
+  const wanted = STATE.interviewMdFiles.map((name) => `${name}`).join('\u0000');
+  if (sel.dataset.options !== wanted) {
+    sel.innerHTML = '';
+    for (const name of STATE.interviewMdFiles) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    }
+    sel.dataset.options = wanted;
+  }
+  if (sel.value !== current) sel.value = current;
+  updateInterviewMdHint();
+  if (!sel.dataset.bound) {
+    sel.dataset.bound = '1';
+    sel.addEventListener('change', onInterviewMdSelectChange);
+  }
+}
+
+function onInterviewMdSelectChange(ev) {
+  const name = ev.target.value;
+  if (!name || !STATE.interviewMdFiles.includes(name)) return;
+  STATE.interviewMdFile = name;
+  loadInterviewMdIntoEditor();
+  updateInterviewMdHint();
+}
+
+function loadInterviewMdIntoEditor() {
+  const editor = document.getElementById('editor-interview');
+  if (!editor) return;
+  const name = STATE.interviewMdFile;
+  const text = STATE.interviewMdContents[name] || '';
+  const changed = editor.value !== text;
+  if (changed) {
+    editor.value = text;
+    STATE.previewCache.interview = null;
+  }
+  // Only re-render the preview when the text actually changed and the
+  // user is looking at the panel - polling otherwise wastefully runs
+  // the markdown renderer every 4s on unchanged content.
+  if (changed && (STATE.activePanel === 'claude' || STATE.activePanel === 'interview')) {
+    updateMarkdownPreview('interview', true);
+  }
+}
+
+function updateInterviewMdHint() {
+  const hint = document.getElementById('interview-md-hint');
+  if (!hint) return;
+  if (STATE.interviewMdFile === FILES.plan) {
+    hint.innerHTML = 'Read-only here. Edit PLAN.md in the <strong>PLAN.md</strong> tab.';
+  } else {
+    hint.textContent = `Read-only view of ${STATE.interviewMdFile} (top-level file in .RUD/${STATE.slug || '<task>'}/).`;
+  }
 }
 
 async function openFullscreenPreview(which) {
@@ -808,28 +927,120 @@ async function selectTask(slug) {
   document.querySelectorAll('#task-list li').forEach((li) => {
     li.classList.toggle('active', li.dataset.slug === slug);
   });
-  const d = await api('/api/tasks/' + encodeURIComponent(slug));
+
+  // ---------- Optimistic render ----------
+  // The sidebar's loadTasks() already cached the full TaskMeta for every
+  // task. Render the header / tab bar / agent labels from that cache
+  // BEFORE awaiting the API so the click feels instant; the heavier
+  // /api/tasks/<slug> response (worktree git status + claude session
+  // enrichment + markdown contents) then enriches the view in-place.
+  const cached = (STATE.tasks || []).find((t) => t.slug === slug) || null;
+  if (cached) {
+    $('#task-empty').hidden = true;
+    $('#task-view').hidden = false;
+    $('#task-title').textContent = cached.title || slug;
+    $('#task-slug').textContent = cached.slug;
+    $('#task-backend').textContent = `${agentLabel(cached.agent)}${cached.interview_model ? ' · ' + cached.interview_model : ''}`;
+    $('#task-goal').textContent = cached.general_goal || '';
+    $('#inp-interview-target').value = cached.tmux_interview_target || '';
+    setTmuxOutputText(cached.tmux_interview_target
+      ? 'Loading Claude pane…'
+      : 'Click Start Claude to launch a tmux pane in the worktree.');
+    // Empty out the markdown editors so the previous task's content
+    // doesn't briefly flash through.
+    $('#editor-plan').value = '';
+    $('#editor-interview').value = '';
+    STATE.interviewMdContents = {};
+    STATE.previewCache = {};
+    applyAgentLabels(cached);
+    buildTabs(cached);
+    showPanel(DEFAULT_TAB);
+  }
+
+  let d;
+  try {
+    d = await api('/api/tasks/' + encodeURIComponent(slug));
+  } catch (err) {
+    if (STATE.slug !== slug) return;
+    setTmuxOutputText(`Failed to load task: ${err.message || err}`);
+    throw err;
+  }
+  // The user may have clicked a different task while we were awaiting -
+  // abort cleanly so we don't trample the newer selection.
+  if (STATE.slug !== slug) return;
+
+  // ---------- Full render with fresh server data ----------
   $('#task-empty').hidden = true;
   $('#task-view').hidden = false;
   $('#task-title').textContent = d.meta.title || slug;
   $('#task-slug').textContent = d.meta.slug;
-  $('#task-backend').textContent = `model: ${d.meta.interview_model || ''}`;
+  $('#task-backend').textContent = `${agentLabel(d.meta.agent)}${d.meta.interview_model ? ' · ' + d.meta.interview_model : ''}`;
   $('#task-goal').textContent = d.meta.general_goal || '';
-  $('#editor-plan').value = d.templates[FILES.plan] || '';
-  $('#editor-interview').value = d.interview || '';
+  const planText = d.templates[FILES.plan] || '';
+  $('#editor-plan').value = planText;
+  applyInterviewMdPayload(d);
   invalidatePreviewCache();
   updateActiveMarkdownPreview();
   $('#inp-interview-target').value = d.meta.tmux_interview_target || '';
-  $('#interview-out').textContent = d.meta.tmux_interview_target
-    ? 'Loading Claude pane…'
-    : (d.interview || 'Click Start Claude to launch a tmux pane in the worktree.');
+  if (!d.meta.tmux_interview_target) {
+    setTmuxOutputText('Click Start Claude to launch a tmux pane in the worktree.');
+  }
   renderClaudeInfo(d.meta, d.claude || null, d.worktree_statuses || []);
+  applyAgentLabels(d.meta || {});
   resetPlanDirty();
-  buildTabs();
-  showPanel(DEFAULT_TAB);
+  buildTabs(d.meta);
+  // Keep the user on whatever panel optimistic-render showed (DEFAULT_TAB
+  // by default); calling showPanel again would re-trigger the deferred
+  // refresh callbacks unnecessarily.
+  if (!cached) showPanel(DEFAULT_TAB);
   refreshInterviewPreview();
   refreshClaudeSessions();
   startPanePolling();
+}
+
+function applyAgentLabels(meta) {
+  const label = agentLabel(meta.agent);
+  const startBtn = document.getElementById('btn-interview-start');
+  const stopBtn = document.getElementById('btn-interview-stop');
+  if (startBtn) startBtn.textContent = `Start ${label}`;
+  if (stopBtn) stopBtn.textContent = `Stop ${label}`;
+  const heading = document.querySelector('.tab-panel[data-panel="claude"] .terminal-card__bar h4');
+  if (heading) heading.textContent = `${label} Terminal`;
+  const out = document.getElementById('interview-out');
+  if (out && /^Click Start (Claude|Codex)/.test(out.textContent || '')) {
+    setTmuxOutputText(`Click Start ${label} to launch a tmux pane in the worktree.`);
+  }
+  // Show agent in info card + bind change.
+  const sel = document.getElementById('claude-info-agent');
+  if (sel) {
+    sel.value = normalizeAgent(meta.agent);
+    // bind once
+    if (!sel.dataset.bound) {
+      sel.dataset.bound = '1';
+      sel.addEventListener('change', onAgentChange);
+    }
+  }
+}
+
+async function onAgentChange(ev) {
+  const sel = ev.target;
+  const next = sel.value;
+  if (!STATE.slug) return;
+  // Look at the current meta to confirm change is meaningful.
+  if (!confirm(`Switch agent to ${agentLabel(next)}? Stop any running pane first; the new pane will use the ${agentLabel(next)} CLI.`)) {
+    sel.value = sel.dataset.previous || 'claude';
+    return;
+  }
+  sel.dataset.previous = next;
+  try {
+    const r = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/meta', {
+      method: 'PUT',
+      body: JSON.stringify({ agent: next }),
+    });
+    if (r.meta) await selectTask(STATE.slug);
+  } catch (err) {
+    alert(err.message || 'agent switch failed');
+  }
 }
 
 async function deleteSelectedTask() {
@@ -838,7 +1049,7 @@ async function deleteSelectedTask() {
   const title = $('#task-title')?.textContent || slug;
   const ok = confirm(
     `Delete task "${title}" (${slug})?\n\n` +
-    `This permanently removes .RUD/${slug}/, including PLAN.md, NOTES.md, INTERVIEW.md, and task metadata. ` +
+    `This permanently removes .RUD/${slug}/, including PLAN.md, the worktree, and task metadata. ` +
     `Running tmux sessions are not stopped automatically.`
   );
   if (!ok) return;
@@ -859,22 +1070,21 @@ async function deleteSelectedTask() {
 async function refreshTaskTemplates() {
   if (!STATE.slug) return;
   const d = await api('/api/tasks/' + encodeURIComponent(STATE.slug));
-  const next = {
-    plan: d.templates[FILES.plan] || '',
-    interview: d.interview || '',
-  };
+  const planText = d.templates[FILES.plan] || '';
+  // The dedicated PLAN.md editor is always bound to PLAN.md; the
+  // embedded read-only viewer on the Claude tab follows whichever file
+  // the user picked in the dropdown.
+  const planEl = $('#editor-plan');
   const active = document.activeElement;
   let changed = false;
-  for (const which of Object.keys(next)) {
-    const el = $(`#editor-${which}`);
-    if (!el) continue;
-    if (el === active) continue;
-    if (el.value !== next[which]) {
-      el.value = next[which];
-      STATE.previewCache[which] = null;
-      changed = true;
-    }
+  if (planEl && planEl !== active && planEl.value !== planText) {
+    planEl.value = planText;
+    STATE.previewCache.plan = null;
+    changed = true;
   }
+  // Sync the picker payload (file list + content) and reload the embed
+  // from the freshly fetched contents.
+  applyInterviewMdPayload(d);
   if (changed) updateActiveMarkdownPreview();
   if (d.meta) renderClaudeInfo(d.meta, d.claude || null, d.worktree_statuses || []);
 }
@@ -894,15 +1104,43 @@ async function saveTemplate(name, textareaId, statusId) {
 
 // ===== Interview pane (tmux) =====
 
+// Smart updater for the captured-tmux <pre>. By default we scroll to the
+// bottom (most-recent output, the way a real terminal feels). If the
+// user has scrolled up to read earlier output, we leave their position
+// alone so polling doesn't yank them away.
+function setTmuxOutputText(text) {
+  const out = document.getElementById('interview-out');
+  if (!out) return;
+  // When the element isn't laid out yet (e.g. tab hidden, clientHeight=0)
+  // treat that as "near bottom" so the next time the user actually sees
+  // the pane it lands at the latest output.
+  const nearBottom =
+    out.clientHeight === 0
+    || (out.scrollHeight - out.clientHeight - out.scrollTop) < 80;
+  out.textContent = text;
+  if (nearBottom) {
+    scrollTmuxOutputToBottom();
+  }
+}
+
+function scrollTmuxOutputToBottom() {
+  const out = document.getElementById('interview-out');
+  if (!out) return;
+  // Defer to next frame so scrollHeight reflects the freshly-set text
+  // (and so any "display: block" tab activation has actually laid out).
+  requestAnimationFrame(() => {
+    out.scrollTop = out.scrollHeight;
+  });
+}
+
 async function refreshInterviewPreview() {
   const target = $('#inp-interview-target').value.trim();
-  const out = $('#interview-out');
   if (!target) return;
   try {
     const d = await api('/api/tmux/capture?target=' + encodeURIComponent(target) + '&lines=200');
-    out.textContent = d.ok ? d.text : (d.error || '(error)');
+    setTmuxOutputText(d.ok ? d.text : (d.error || '(error)'));
   } catch (err) {
-    out.textContent = err.message;
+    setTmuxOutputText(err.message);
   }
 }
 
@@ -952,7 +1190,7 @@ function startPanePolling() {
 async function startInterviewPane() {
   if (!STATE.slug) return;
   showPanel('interview');
-  $('#interview-out').textContent = 'Starting Claude Code interview pane…\nPrompt will be pasted automatically in about 5 seconds.';
+  setTmuxOutputText('Starting Claude Code interview pane…\nPrompt will be pasted automatically in about 5 seconds.');
   const r = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/interview/start', {
     method: 'POST',
     body: '{}',
@@ -985,6 +1223,8 @@ function resetCreateForm() {
   $('#new-title').value = '';
   $('#new-goal').value = '';
   $('#new-task-status').textContent = '';
+  const defaultAgent = document.querySelector('input[name="new-agent-radio"][value="claude"]');
+  if (defaultAgent) defaultAgent.checked = true;
 }
 
 function isMobileViewport() {
@@ -1152,6 +1392,26 @@ function resetPlanDirty() {
 async function savePlanFromEditor() {
   await saveTemplate(FILES.plan, '#editor-plan', '#status-plan');
   resetPlanDirty();
+  syncInterviewEmbedFromPlanEditor();
+}
+
+// After a manual PLAN.md save, propagate the change into the embedded
+// read-only viewer on the Claude tab immediately (rather than waiting
+// for the 4 s polling cycle). Only fire when the embed is actually
+// pointed at PLAN.md - otherwise we'd stomp the user's selection of
+// e.g. review.md.
+function syncInterviewEmbedFromPlanEditor() {
+  if (STATE.interviewMdFile !== FILES.plan) return;
+  const planEl = document.getElementById('editor-plan');
+  const embedEl = document.getElementById('editor-interview');
+  if (!planEl || !embedEl) return;
+  STATE.interviewMdContents[FILES.plan] = planEl.value;
+  if (embedEl.value === planEl.value) return;
+  embedEl.value = planEl.value;
+  STATE.previewCache.interview = null;
+  if (STATE.activePanel === 'interview' || STATE.activePanel === 'claude') {
+    updateMarkdownPreview('interview', true);
+  }
 }
 
 (function initPlanEditorSaveUx() {
@@ -1603,7 +1863,7 @@ async function resumeClaudeSession(sessionId) {
     });
     if (!r.ok) throw new Error(r.error || 'resume failed');
     $('#inp-interview-target').value = r.target || '';
-    $('#interview-out').textContent = `Resuming Claude session ${sessionId}\nNew tmux target: ${r.target || '(pending)'}`;
+    setTmuxOutputText(`Resuming Claude session ${sessionId}\nNew tmux target: ${r.target || '(pending)'}`);
     await refreshInterviewPreview();
     await refreshClaudeSessions();
   } catch (err) {
@@ -1622,7 +1882,7 @@ document.getElementById('btn-interview-stop').addEventListener('click', async ()
   });
   $('#inp-interview-target').value = '';
   $('#interview-target-label').textContent = 'Not started';
-  $('#interview-out').textContent = `Stopped ${r.tmux_session || ''}\n${r.tmux_message || ''}`;
+  setTmuxOutputText(`Stopped ${r.tmux_session || ''}\n${r.tmux_message || ''}`);
 });
 
 document.getElementById('btn-interview-send').addEventListener('click', () => sendPaneText(true));
@@ -1636,6 +1896,8 @@ document.getElementById('btn-delete-task').addEventListener('click', deleteSelec
 document.getElementById('btn-new-task').addEventListener('click', async () => {
   const title = $('#new-title').value.trim();
   const general_goal = $('#new-goal').value.trim();
+  const agentRadio = document.querySelector('input[name="new-agent-radio"]:checked');
+  const agent = agentRadio ? agentRadio.value : 'claude';
   const btn = $('#btn-new-task');
   const status = $('#new-task-status');
   if (!title || !general_goal) {
@@ -1645,7 +1907,7 @@ document.getElementById('btn-new-task').addEventListener('click', async () => {
   btn.disabled = true;
   status.textContent = 'Creating…';
   try {
-    const body = { title, general_goal };
+    const body = { title, general_goal, agent };
     const { meta } = await api('/api/tasks', { method: 'POST', body: JSON.stringify(body) });
     resetCreateForm();
     closeCreateModal();

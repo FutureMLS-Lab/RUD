@@ -29,6 +29,7 @@ import shlex
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -37,21 +38,29 @@ from urllib.parse import parse_qs, unquote, urlparse
 from claudeloop.openclaw import OpenClawClient, OpenClawConfig, openclaw_status
 from claudeloop.paths import bundled_skills_path, web_static_dir
 from claudeloop.rud_task import (
+    AGENT_CLAUDE,
+    AGENT_CODEX,
     PLAN,
+    SUPPORTED_AGENTS,
     add_claude_session,
+    agent_default_model,
+    agent_label,
+    build_agent_command,
     create_task,
     delete_task,
     detect_and_persist_worktree,
     list_session_files,
+    list_task_markdown_files,
     list_task_worktree_statuses,
     list_task_worktrees,
     list_tasks,
     list_worktree_candidates,
+    normalize_agent,
     prepare_task_worktree_from,
     push_worktree_branch,
-    read_interview,
     read_meta,
     read_project_notes,
+    read_task_markdown_file,
     read_template,
     remove_task_worktree,
     reorder_tasks,
@@ -93,11 +102,19 @@ def _tmux_id_fragment(project_id: str) -> str:
     return frag or "proj"
 
 
-def _safe_claude_session_name(project_id: str, slug: str) -> str:
+def _safe_claude_session_name(project_id: str, slug: str, agent: str = AGENT_CLAUDE) -> str:
+    """Tmux session name for a task's agent pane.
+
+    The agent name is part of the prefix so a claude pane and a codex
+    pane for the same project never share a tmux session if the user
+    ever changes agent.  Backwards-compatible aliases handled in
+    ``_filter_tmux_sessions_for_project``.
+    """
     tid = _tmux_id_fragment(project_id)
-    raw = f"claudeloop-claude-{tid}-{slug}"
+    agent = normalize_agent(agent)
+    raw = f"claudeloop-{agent}-{tid}-{slug}"
     safe = re.sub(r"[^A-Za-z0-9_.@-]+", "-", raw).strip("-")
-    return safe[:90] or "claudeloop-claude"
+    return safe[:90] or f"claudeloop-{agent}"
 
 
 def _session_name_from_tmux_target(target: str) -> str:
@@ -130,10 +147,12 @@ def _filter_tmux_sessions_for_project(
 ) -> list[dict[str, str]]:
     tid = _tmux_id_fragment(project_id)
     picked: dict[str, dict[str, str]] = {}
-    # New session-name prefix is "claudeloop-claude-<tid>-..."; we also
-    # accept the legacy "claudeloop-interview-<tid>-..." for tasks created
-    # before the rename.
-    prefixes = (f"claudeloop-claude-{tid}-", f"claudeloop-interview-{tid}-")
+    # We accept session-name prefixes for every supported agent plus the
+    # legacy "claudeloop-interview-<tid>-..." used before the rename.
+    prefixes = tuple(
+        f"claudeloop-{name}-{tid}-"
+        for name in (*SUPPORTED_AGENTS, "interview")
+    )
     for s in sessions:
         name = str(s.get("name", ""))
         if name and tid and any(name.startswith(p) for p in prefixes):
@@ -239,7 +258,7 @@ def _build_claude_prompt(project_root: Path, slug: str) -> str:
         if sp.is_file():
             skills = sp.read_text(encoding="utf-8", errors="replace")[:12000]
     plan_path = td / PLAN
-    return f"""You are running claudeloop's Claude pane for this task.
+    return f"""You are running claudeloop's {agent_label(meta.agent)} pane for this task.
 
 You are in the task directory:
 {td}
@@ -257,7 +276,8 @@ Default skills:
 How you should help the user:
 1. If {plan_path} is empty or vague, run a short deep-interview - ask one
    high-leverage question at a time about scope, constraints, acceptance,
-   tests, non-goals. Capture decisions in {td / "INTERVIEW.md"}.
+   tests, non-goals. Capture all the decisions DIRECTLY in {plan_path};
+   do not create a separate notes / transcript / INTERVIEW file.
 2. Once the goal is clear, write or overwrite {plan_path} with:
    - Goal, Constraints / non-goals, Acceptance, Next steps (checkbox list),
      Progress Log section the user updates as they work.
@@ -265,14 +285,15 @@ How you should help the user:
    session and drive the work with ``/goal`` against PLAN.md.
 
 Behavioural constraints:
-- Do not create scattered TODO / PROGRESS / status files in the repo;
-  PLAN.md is the only task-state file.
-- Project-scoped scratch lives in the project's NOTES.md (handled by the
-  user via the web UI), not inside the worktree.
+- PLAN.md is the ONLY task-state file. Do not create INTERVIEW.md,
+  TODO.md, PROGRESS.md, NOTES.md, or any other scattered status files in
+  the task directory or the repo.
+- Project-scoped scratch lives in the project's NOTES.md at .RUD/NOTES.md
+  (handled by the user via the web UI), not inside the worktree.
 
-Begin by reading {plan_path} and {td / "INTERVIEW.md"}, then either ask
-the first interview question or, if PLAN.md is already detailed enough,
-acknowledge that and wait for ``/goal``.
+Begin by reading {plan_path}, then either ask the first interview
+question or, if PLAN.md is already detailed enough, acknowledge that and
+wait for ``/goal``.
 """
 
 
@@ -319,12 +340,13 @@ class ClaudeRegistry:
         if not td.is_dir():
             return {"ok": False, "error": "Task directory missing"}
 
-        # Run claude inside the worktree when we have one - that's where
-        # the user will eventually want /goal to operate.
+        # Run the agent inside the worktree when we have one - that's where
+        # the user will eventually want /goal (or codex's equivalent) to act.
         worktree = task_worktree_path(project_root, slug)
         cwd = worktree if worktree is not None else td
 
-        session_name = _safe_claude_session_name(project_id, slug)
+        agent = normalize_agent(meta.agent)
+        session_name = _safe_claude_session_name(project_id, slug, agent)
         target = f"{session_name}:0.0"
         if self._tmux_session_exists(session_name):
             if resume_session_id:
@@ -340,11 +362,12 @@ class ClaudeRegistry:
                 "target": target,
                 "session": session_name,
                 "cwd": str(cwd),
+                "agent": agent,
                 "already_running": True,
             }
 
         # Snapshot existing session files so the watcher can spot the new one.
-        existing_files = {p.name for p in list_session_files(cwd)}
+        existing_files = {p.name for p in list_session_files(cwd, agent)}
 
         try:
             subprocess.run(
@@ -361,19 +384,14 @@ class ClaudeRegistry:
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             return {"ok": False, "error": str(e)}
 
-        claude_cmd: list[str] = [
-            "claude",
-            "--model",
-            meta.interview_model or "claude-sonnet-4-6",
-            "--dangerously-skip-permissions",
-            "--effort",
-            "max",
-        ]
-        if resume_session_id:
-            claude_cmd += ["--resume", resume_session_id]
+        agent_cmd = build_agent_command(
+            agent,
+            model=meta.interview_model or agent_default_model(agent),
+            resume_session_id=resume_session_id,
+        )
         try:
             proc = subprocess.Popen(
-                ["tmux", "send-keys", "-t", target, shlex.join(claude_cmd), "Enter"],
+                ["tmux", "send-keys", "-t", target, shlex.join(agent_cmd), "Enter"],
                 cwd=str(cwd),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -390,13 +408,13 @@ class ClaudeRegistry:
             add_claude_session(project_root, slug, resume_session_id)
             threading.Thread(
                 target=self._watch_for_session_id,
-                args=(project_root, slug, cwd, existing_files),
+                args=(project_root, slug, cwd, agent, existing_files),
                 daemon=True,
             ).start()
         else:
             threading.Thread(
                 target=self._paste_prompt_and_watch_session,
-                args=(project_root, slug, target, cwd, existing_files),
+                args=(project_root, slug, target, cwd, agent, existing_files),
                 daemon=True,
             ).start()
         return {
@@ -404,23 +422,30 @@ class ClaudeRegistry:
             "target": target,
             "session": session_name,
             "cwd": str(cwd),
+            "agent": agent,
             "resumed_session_id": resume_session_id or None,
             "already_running": False,
             "prompt_pending": not bool(resume_session_id),
         }
 
     def stop(self, project_root: Path, project_id: str, slug: str) -> dict[str, Any]:
-        session_name = _safe_claude_session_name(project_id, slug)
+        meta = read_meta(project_root, slug)
+        agent = normalize_agent(meta.agent) if meta else AGENT_CLAUDE
+        session_name = _safe_claude_session_name(project_id, slug, agent)
         stopped, msg = self._kill_tmux_session(session_name)
-        # Also clean up the legacy interview session name in case this task
-        # was created before the rename.
-        legacy_name = re.sub(
-            r"^claudeloop-claude-",
-            "claudeloop-interview-",
-            session_name,
-        )
-        if legacy_name != session_name:
-            self._kill_tmux_session(legacy_name)
+        # Also clean up the legacy interview session name and the *other*
+        # agent's session in case the user flipped agents.
+        legacy_aliases = {
+            re.sub(r"^claudeloop-[A-Za-z0-9]+-", "claudeloop-interview-", session_name),
+            *[
+                _safe_claude_session_name(project_id, slug, other)
+                for other in SUPPORTED_AGENTS
+                if other != agent
+            ],
+        }
+        legacy_aliases.discard(session_name)
+        for alias in legacy_aliases:
+            self._kill_tmux_session(alias)
         update_meta(project_root, slug, tmux_interview_target="")
         with self._lock:
             self._runs.pop(self._registry_key(project_id, slug), None)
@@ -446,12 +471,13 @@ class ClaudeRegistry:
             return False
         return r.returncode == 0
 
-    def session_status(self, project_id: str, slug: str) -> dict[str, Any]:
-        session_name = _safe_claude_session_name(project_id, slug)
+    def session_status(self, project_id: str, slug: str, agent: str = AGENT_CLAUDE) -> dict[str, Any]:
+        session_name = _safe_claude_session_name(project_id, slug, agent)
         return {
             "session": session_name,
             "target": f"{session_name}:0.0",
             "tmux_alive": self._tmux_session_exists(session_name),
+            "agent": normalize_agent(agent),
         }
 
     def _kill_tmux_session(self, session_name: str) -> tuple[bool, str]:
@@ -486,14 +512,15 @@ class ClaudeRegistry:
         project_root: Path,
         slug: str,
         cwd: Path,
+        agent: str,
         existing_filenames: set[str],
     ) -> None:
-        """Poll ~/.claude/projects/<encoded>/ for a freshly-written session file."""
+        """Poll the agent's session dir for a freshly-written session file."""
         deadline = time.time() + 90.0
         while time.time() < deadline:
-            for p in list_session_files(cwd):
+            for p in list_session_files(cwd, agent):
                 if p.name not in existing_filenames:
-                    sid = session_id_from_path(p)
+                    sid = session_id_from_path(p, agent)
                     if sid:
                         add_claude_session(project_root, slug, sid)
                         return
@@ -505,6 +532,7 @@ class ClaudeRegistry:
         slug: str,
         target: str,
         cwd: Path,
+        agent: str,
         existing_filenames: set[str],
     ) -> None:
         time.sleep(5)
@@ -513,12 +541,13 @@ class ClaudeRegistry:
         if prompt:
             ok, _ = send_pane_text(target, prompt, submit=False)
             if ok:
-                # Claude Code often needs an empty-line submit after bracketed paste.
+                # Both Claude Code and Codex need an Enter to submit after
+                # the bracketed paste; the extra Enter is a no-op for both.
                 time.sleep(0.3)
                 send_pane_key(target, "Enter")
                 time.sleep(0.1)
                 send_pane_key(target, "Enter")
-        self._watch_for_session_id(project_root, slug, cwd, existing_filenames)
+        self._watch_for_session_id(project_root, slug, cwd, agent, existing_filenames)
 
 
 # --- HTTP handler factory ---------------------------------------------------
@@ -605,14 +634,15 @@ def make_handler(
             return False
 
         def _claude_session_summary(self, project_id: str, slug: str, meta) -> dict[str, Any]:
+            agent = normalize_agent(meta.agent)
             cwd_str = (meta.worktree_path or "").strip() or str(task_root(pr.get_path(project_id), slug))
             try:
                 cwd = Path(cwd_str)
             except OSError:
                 cwd = Path(cwd_str)
             files_by_id: dict[str, dict[str, Any]] = {}
-            for p in list_session_files(cwd):
-                sid = session_id_from_path(p)
+            for p in list_session_files(cwd, agent):
+                sid = session_id_from_path(p, agent)
                 if not sid:
                     continue
                 try:
@@ -639,8 +669,10 @@ def make_handler(
                 if sid not in seen:
                     ordered.append(info)
             ordered.sort(key=lambda x: x.get("mtime", 0.0), reverse=True)
-            live = claude_registry.session_status(project_id, slug)
+            live = claude_registry.session_status(project_id, slug, agent)
             return {
+                "agent": agent,
+                "agent_label": agent_label(agent),
                 "tracked": [sid for sid in meta.claude_session_ids],
                 "sessions": ordered,
                 "tmux_alive": live["tmux_alive"],
@@ -858,14 +890,39 @@ def make_handler(
                 # auto-worktree feature, or tasks where the user manually
                 # added a worktree under work/ later on.
                 meta = detect_and_persist_worktree(root, slug) or meta
-                templates = {PLAN: read_template(root, slug, PLAN) or ""}
-                summary = self._claude_session_summary(project_id, slug, meta) if project_id else None
-                statuses = list_task_worktree_statuses(root, slug)
+                # The expensive bits are git-status-per-worktree and the
+                # Claude session enrichment (tmux subprocess + filesystem
+                # scan). Fan both out so they overlap with the synchronous
+                # markdown reads below - on a typical task this brings the
+                # endpoint from ~600-1500ms down to ~150-400ms.
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    statuses_fut = pool.submit(list_task_worktree_statuses, root, slug)
+                    summary_fut = (
+                        pool.submit(self._claude_session_summary, project_id, slug, meta)
+                        if project_id
+                        else None
+                    )
+                    # Surface every top-level *.md file in the task directory so
+                    # the Claude tab's embedded picker can switch between them.
+                    # PLAN.md is always present even if empty so the dedicated
+                    # PLAN.md editor has something to render.
+                    md_names = list_task_markdown_files(root, slug)
+                    templates: dict[str, str] = {}
+                    for md_name in md_names:
+                        content = read_task_markdown_file(root, slug, md_name)
+                        if content is not None:
+                            templates[md_name] = content
+                    if PLAN not in templates:
+                        templates[PLAN] = read_template(root, slug, PLAN) or ""
+                        if PLAN not in md_names:
+                            md_names = [PLAN, *md_names]
+                    statuses = statuses_fut.result()
+                    summary = summary_fut.result() if summary_fut is not None else None
                 st, b, h = _json_bytes(
                     {
                         "meta": meta.to_dict(),
                         "templates": templates,
-                        "interview": read_interview(root, slug),
+                        "task_markdown_files": md_names,
                         "claude": summary or {},
                         "worktree_statuses": statuses,
                     }
@@ -921,12 +978,21 @@ def make_handler(
                     cand = Path(str(raw_sp)).expanduser().resolve()
                     if cand.is_file():
                         skills_path = cand
+                raw_agent = str(body.get("agent", AGENT_CLAUDE)).strip().lower()
+                if raw_agent and raw_agent not in SUPPORTED_AGENTS:
+                    st, b, h = _json_bytes(
+                        {"error": f"agent must be one of {sorted(SUPPORTED_AGENTS)}"},
+                        400,
+                    )
+                    self._send(st, b, h)
+                    return
                 meta = create_task(
                     root,
                     title,
                     general_goal,
                     skills_path=skills_path,
-                    interview_model=str(body.get("interview_model", "claude-sonnet-4-6")),
+                    interview_model=str(body.get("interview_model", "")),
+                    agent=raw_agent or AGENT_CLAUDE,
                 )
                 cands = list_worktree_candidates(root)
                 hint = ""
@@ -1371,18 +1437,30 @@ def make_handler(
                     return
                 title = body.get("title")
                 goal = body.get("general_goal")
-                if title is None and goal is None:
+                agent_in = body.get("agent")
+                if title is None and goal is None and agent_in is None:
                     st, b, h = _json_bytes(
-                        {"error": "supply title and/or general_goal"}, 400
+                        {"error": "supply title and/or general_goal and/or agent"},
+                        400,
                     )
                     self._send(st, b, h)
                     return
+                if agent_in is not None:
+                    raw = str(agent_in).strip().lower()
+                    if raw not in SUPPORTED_AGENTS:
+                        st, b, h = _json_bytes(
+                            {"error": f"agent must be one of {sorted(SUPPORTED_AGENTS)}"},
+                            400,
+                        )
+                        self._send(st, b, h)
+                        return
+                    update_meta(root, slug, agent=raw)
                 updated = rename_task_meta(
                     root,
                     slug,
                     title=str(title) if title is not None else None,
                     general_goal=str(goal) if goal is not None else None,
-                )
+                ) or read_meta(root, slug)
                 if updated is None:
                     st, b, h = _json_bytes({"error": "not found"}, 404)
                     self._send(st, b, h)

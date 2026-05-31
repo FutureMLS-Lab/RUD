@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Dump PLAN / TASK_PROMPT / SUCCESS / INTERVIEW for a task.
+# Dump PLAN.md for a task. Older versions also dumped TASK_PROMPT.md,
+# SUCCESS_CONDITION.md, and INTERVIEW.md, but PLAN.md is now the only
+# per-task markdown file.
 # Resolves ?project= via scripts/cl_remote_api.py (GET /api/projects), unless you export CLAUDELOOP_PROJECT_ID / CLAUDELOOP_PROJECT_PATH.
 set -euo pipefail
 
@@ -34,9 +36,6 @@ task = sys.argv[1]
 d = json.load(sys.stdin)
 templates = d.get("templates", {})
 print(f"# {task}")
-for name in ("PLAN.md", "TASK_PROMPT.md", "SUCCESS_CONDITION.md"):
-    print(f"\n## {name}\n")
-    print(templates.get(name, ""))
-print("\n## INTERVIEW.md\n")
-print(d.get("interview", ""))
+print("\n## PLAN.md\n")
+print(templates.get("PLAN.md", ""))
 ' "$TASK"

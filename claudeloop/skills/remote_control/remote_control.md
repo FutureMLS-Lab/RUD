@@ -233,8 +233,10 @@ Important fields:
 - `meta.tmux_runner_target`: runner pane target, for example `claudeloop-qwen34b-CoQuant:0.0`.
 - `meta.tmux_evaluator_target`: evaluator pane target, for example `claudeloop-qwen34b-CoQuant:0.1`.
 - `work_repos`: repo keys with prepared worktrees. Use these as the `repo` query/body value.
-- `templates`: markdown task documents keyed by filename.
-- `interview`: content of `INTERVIEW.md`.
+- `templates`: markdown task documents keyed by filename. The only
+  per-task file in current builds is `PLAN.md` - older `INTERVIEW.md` /
+  `TASK_PROMPT.md` / `SUCCESS_CONDITION.md` files are no longer written
+  or returned.
 
 ## Read Task Markdown
 
@@ -261,21 +263,14 @@ curl -s "${CURL_AUTH[@]}" "$(cl_api_scope "/api/tasks/<task>")" \
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["templates"].get("SUCCESS_CONDITION.md",""))'
 ```
 
-Read the interview transcript/notes:
-
-```bash
-curl -s "${CURL_AUTH[@]}" "$(cl_api_scope "/api/tasks/<task>")" \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("interview",""))'
-```
-
 Interpretation:
 
-- `PLAN.md` is authoritative for progress, status, blockers, and next steps.
-- `TASK_PROMPT.md` is the task the runner should execute.
-- `SUCCESS_CONDITION.md` is the evaluator's pass/fail contract.
-- `INTERVIEW.md` is supporting context from the deep-interview.
+- `PLAN.md` is authoritative for goal, progress, status, blockers, and
+  next steps. It is now the only per-task markdown file.
 
-Do not create new status files. If asked to update task state, tell the runner to update `PLAN.md`.
+Do not create new status files (INTERVIEW.md, TASK_PROMPT.md,
+SUCCESS_CONDITION.md, TODO.md, …). If asked to update task state, write
+into `PLAN.md`.
 
 ## Get Repos And Pane Targets
 
@@ -509,7 +504,7 @@ curl -s "${CURL_AUTH[@]}" -X POST "$(cl_api_scope "/api/tasks/<task>/worker/star
   -H 'Content-Type: application/json' \
   -d '{
     "repo": "<repo>",
-    "model": "claude-opus-4-6",
+    "model": "claude-opus-4-8",
     "max_iters": 200
   }'
 ```

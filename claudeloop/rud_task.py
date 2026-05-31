@@ -7,8 +7,9 @@ Layout per project root::
         task-order.json
         <slug>/
             task.json       # task metadata
-            PLAN.md         # editable plan (deep-interview writes this)
-            INTERVIEW.md    # transcript-style log of the Claude pane
+            PLAN.md         # the only per-task markdown file - Claude reads
+                            # and rewrites it; the user edits it via the
+                            # PLAN.md tab and the embedded view on Claude tab
             work/<repo>/    # auto-created git worktree (branch zhongzhu/<slug>)
 
 There is no worker / evaluator / runner anymore - the user drives Claude
@@ -23,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,14 +37,71 @@ WORK_SUBDIR = "work"
 
 PLAN = "PLAN.md"
 NOTES = "NOTES.md"
-INTERVIEW = "INTERVIEW.md"
-LEGACY_INTERVIEW = "interview.md"
 META = "task.json"
 TASK_ORDER = "task-order.json"
 
 # Only PLAN.md is editable through the per-task template API now.  NOTES.md
 # lives at the project root and has its own dedicated endpoint.
 ALLOWED_TEMPLATE_NAMES = frozenset({PLAN})
+
+# Supported agent CLIs that can drive a task's tmux pane.
+AGENT_CLAUDE = "claude"
+AGENT_CODEX = "codex"
+SUPPORTED_AGENTS = frozenset({AGENT_CLAUDE, AGENT_CODEX})
+
+
+def normalize_agent(name: str | None) -> str:
+    """Return a valid agent name, defaulting to ``claude``."""
+    s = (name or "").strip().lower()
+    return s if s in SUPPORTED_AGENTS else AGENT_CLAUDE
+
+
+def agent_label(name: str) -> str:
+    """Display label for an agent name (e.g. ``"Claude"`` / ``"Codex"``)."""
+    return {AGENT_CLAUDE: "Claude", AGENT_CODEX: "Codex"}.get(
+        normalize_agent(name), "Claude"
+    )
+
+
+def agent_default_model(name: str) -> str:
+    """Default model string to pass to the CLI for a given agent."""
+    return {
+        AGENT_CLAUDE: "claude-opus-4-8",
+        AGENT_CODEX: "",  # codex falls back to its own ~/.codex/config.toml default
+    }.get(normalize_agent(name), "")
+
+
+def build_agent_command(
+    agent: str,
+    model: str = "",
+    resume_session_id: str = "",
+) -> list[str]:
+    """Build the CLI argv that should be exec'd in the tmux pane for *agent*.
+
+    - Claude:  ``claude --model M --dangerously-skip-permissions --effort max [--resume ID]``
+    - Codex:   ``codex resume ID`` (resume) or ``codex`` (fresh), optionally with ``-c model=…``
+    """
+    agent = normalize_agent(agent)
+    if agent == AGENT_CODEX:
+        if resume_session_id:
+            cmd: list[str] = ["codex", "resume", resume_session_id]
+        else:
+            cmd = ["codex"]
+        if model.strip():
+            cmd += ["-c", f"model={model.strip()}"]
+        return cmd
+    # Claude
+    cmd = [
+        "claude",
+        "--model",
+        model or agent_default_model(AGENT_CLAUDE),
+        "--dangerously-skip-permissions",
+        "--effort",
+        "max",
+    ]
+    if resume_session_id:
+        cmd += ["--resume", resume_session_id]
+    return cmd
 
 _TASK_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 _DUBIOUS_OWNERSHIP_RE = re.compile(r"detected dubious ownership in repository at '([^']+)'")
@@ -245,8 +304,11 @@ class TaskMeta:
     created_at: str
     updated_at: str
     skills_path: str = ""
-    interview_model: str = "claude-sonnet-4-6"
+    interview_model: str = "claude-opus-4-8"
     tmux_interview_target: str = ""
+    # Which CLI drives this task's tmux pane.  Defaults to claude so
+    # legacy task.json files (no `agent` key) keep working unchanged.
+    agent: str = AGENT_CLAUDE
     # ``worktree_path`` and ``branch`` are the *primary* worktree (also
     # mirrored at ``worktrees[0]`` / ``branches[0]``); the Claude pane
     # always opens there.  Use the lists when iterating over all the
@@ -270,6 +332,7 @@ class TaskMeta:
             "skills_path": self.skills_path,
             "interview_model": self.interview_model,
             "tmux_interview_target": self.tmux_interview_target,
+            "agent": self.agent,
             "worktree_path": self.worktree_path,
             "branch": self.branch,
             "worktrees": list(self.worktrees),
@@ -323,8 +386,9 @@ class TaskMeta:
             created_at=str(data.get("created_at", "")),
             updated_at=str(data.get("updated_at", "")),
             skills_path=str(data.get("skills_path", "")),
-            interview_model=str(data.get("interview_model", "claude-sonnet-4-6")),
+            interview_model=str(data.get("interview_model", "claude-opus-4-8")),
             tmux_interview_target=str(data.get("tmux_interview_target", "")),
+            agent=normalize_agent(data.get("agent")),
             worktree_path=primary_wt,
             branch=primary_br,
             worktrees=wts,
@@ -402,7 +466,8 @@ def create_task(
     title: str,
     general_goal: str,
     skills_path: Path | None = None,
-    interview_model: str = "claude-sonnet-4-6",
+    interview_model: str = "claude-opus-4-8",
+    agent: str = AGENT_CLAUDE,
     *,
     auto_worktree: bool = True,
 ) -> TaskMeta:
@@ -412,12 +477,6 @@ def create_task(
     root = task_root(project_root, slug)
     root.mkdir(parents=True, exist_ok=True)
     copy_default_plan(root, overwrite=False)
-    if not (root / INTERVIEW).exists():
-        legacy = root / LEGACY_INTERVIEW
-        if legacy.is_file():
-            legacy.replace(root / INTERVIEW)
-        else:
-            (root / INTERVIEW).write_text("", encoding="utf-8")
     sk = (skills_path or bundled_skills_path()).expanduser().resolve()
     if not sk.is_file():
         sk = bundled_skills_path().resolve()
@@ -430,6 +489,7 @@ def create_task(
         updated_at=now,
         skills_path=str(sk),
         interview_model=interview_model,
+        agent=normalize_agent(agent),
     )
     write_meta(project_root, meta)
     _insert_task_order_front(project_root, meta.slug)
@@ -457,6 +517,7 @@ def update_meta(
     skills_path: str | None = None,
     interview_model: str | None = None,
     tmux_interview_target: str | None = None,
+    agent: str | None = None,
     worktree_path: str | None = None,
     branch: str | None = None,
     worktrees: list[str] | None = None,
@@ -471,6 +532,8 @@ def update_meta(
         meta.interview_model = interview_model
     if tmux_interview_target is not None:
         meta.tmux_interview_target = tmux_interview_target
+    if agent is not None:
+        meta.agent = normalize_agent(agent)
     if worktree_path is not None:
         meta.worktree_path = worktree_path
     if branch is not None:
@@ -646,6 +709,89 @@ def write_template(project_root: Path, slug: str, name: str, content: str) -> bo
     return True
 
 
+# --- Top-level task markdown files (for the read-only embed picker) ---------
+
+# Maximum size we will ship inline in the task GET payload. Larger files are
+# listed in the picker but their content is empty; the user can still see the
+# file exists. (10 MB is generous for hand-written markdown.)
+_MAX_TASK_MD_INLINE_BYTES = 10 * 1024 * 1024
+
+
+def _is_safe_md_basename(name: str) -> bool:
+    """Reject anything that could escape the task directory or isn't *.md."""
+    if not name or name in (".", ".."):
+        return False
+    if "/" in name or "\\" in name or "\x00" in name:
+        return False
+    if not name.lower().endswith(".md"):
+        return False
+    return True
+
+
+def list_task_markdown_files(project_root: Path, slug: str) -> list[str]:
+    """Return basenames of ``*.md`` files at the top level of the task root.
+
+    PLAN.md is always listed first when it exists; other files follow
+    case-insensitively sorted. The list excludes anything under
+    subdirectories (e.g. the worktree at ``<task_root>/work/``) and any
+    non-markdown files (e.g. ``task.json``).
+    """
+    root = task_root(project_root, slug)
+    if not root.is_dir():
+        return []
+    try:
+        candidates = [
+            p.name
+            for p in root.iterdir()
+            if p.is_file() and _is_safe_md_basename(p.name)
+        ]
+    except OSError:
+        return []
+    candidates.sort(key=str.lower)
+    if PLAN in candidates:
+        candidates.remove(PLAN)
+        candidates.insert(0, PLAN)
+    return candidates
+
+
+def read_task_markdown_file(
+    project_root: Path,
+    slug: str,
+    name: str,
+    *,
+    max_bytes: int = _MAX_TASK_MD_INLINE_BYTES,
+) -> str | None:
+    """Read a top-level ``*.md`` file in the task root.
+
+    Returns ``None`` when *name* is unsafe, the file does not exist, or
+    its size exceeds *max_bytes* (callers can pass a larger limit to
+    force inclusion, e.g. when serving a single file on demand).
+    """
+    if not _is_safe_md_basename(name):
+        return None
+    root = task_root(project_root, slug)
+    if not root.is_dir():
+        return None
+    path = root / name
+    try:
+        # Double-check the resolved path is still inside the task root
+        # (defends against symlink trickery).
+        path.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return None
+    if not path.is_file():
+        return None
+    try:
+        if path.stat().st_size > max_bytes:
+            return None
+    except OSError:
+        return None
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 # --- Notes (per-project) ----------------------------------------------------
 
 
@@ -730,33 +876,6 @@ def _sudo_rmtree(path: Path, allowed_root: Path) -> bool:
     return result.returncode == 0
 
 
-# --- Interview transcript ---------------------------------------------------
-
-
-def append_interview(project_root: Path, slug: str, role: str, text: str) -> None:
-    td = task_root(project_root, slug)
-    path = td / INTERVIEW
-    legacy = td / LEGACY_INTERVIEW
-    if not path.exists() and legacy.is_file():
-        legacy.replace(path)
-    block = f"\n## {role}\n\n{text.strip()}\n\n"
-    if path.exists():
-        path.write_text(path.read_text(encoding="utf-8") + block, encoding="utf-8")
-    else:
-        path.write_text(block.lstrip(), encoding="utf-8")
-
-
-def read_interview(project_root: Path, slug: str) -> str:
-    td = task_root(project_root, slug)
-    p = td / INTERVIEW
-    legacy = td / LEGACY_INTERVIEW
-    if not p.is_file() and legacy.is_file():
-        legacy.replace(p)
-    if not p.is_file():
-        return ""
-    return p.read_text(encoding="utf-8", errors="replace")
-
-
 # --- Claude session lookup (~/.claude/projects/<encoded>/<uuid>.jsonl) ------
 
 
@@ -772,7 +891,7 @@ def claude_project_dir(cwd: Path) -> Path:
     return (Path.home() / ".claude" / "projects" / encoded).resolve()
 
 
-def list_session_files(cwd: Path) -> list[Path]:
+def _list_claude_session_files(cwd: Path) -> list[Path]:
     """All ``<uuid>.jsonl`` session files for *cwd*, oldest first."""
     d = claude_project_dir(cwd)
     if not d.is_dir():
@@ -782,8 +901,86 @@ def list_session_files(cwd: Path) -> list[Path]:
     return files
 
 
-def session_id_from_path(path: Path) -> str:
-    return path.stem  # filename without .jsonl
+def _read_codex_session_meta(path: Path) -> dict[str, Any] | None:
+    """First-line JSON of a codex rollout file (``{type:'session_meta', payload:{…}}``).
+
+    None if the file is missing or unreadable.  This is what we use to
+    match sessions to a worktree (via ``payload.cwd``) and to extract
+    the session id (``payload.id``).
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            first = f.readline()
+    except OSError:
+        return None
+    if not first:
+        return None
+    try:
+        d = json.loads(first)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    return d
+
+
+def _list_codex_session_files(cwd: Path) -> list[Path]:
+    """Codex rollout files whose ``payload.cwd`` matches *cwd*, oldest first.
+
+    Codex stores sessions at ``~/.codex/sessions/YYYY/MM/DD/rollout-…jsonl``
+    and records the working directory inside the file (no encoded path in
+    the file name).  Filter on the recorded cwd so simultaneous tasks in
+    different worktrees don't get mixed up.
+    """
+    base = (Path.home() / ".codex" / "sessions").resolve()
+    if not base.is_dir():
+        return []
+    try:
+        target = str(cwd.resolve())
+    except OSError:
+        return []
+    out: list[Path] = []
+    for p in base.rglob("rollout-*.jsonl"):
+        meta = _read_codex_session_meta(p)
+        if not meta:
+            continue
+        payload = meta.get("payload") or {}
+        if isinstance(payload, dict) and str(payload.get("cwd") or "") == target:
+            out.append(p)
+    out.sort(key=lambda p: p.stat().st_mtime)
+    return out
+
+
+def list_session_files(cwd: Path, agent: str = AGENT_CLAUDE) -> list[Path]:
+    """Agent-aware session file lookup.
+
+    - ``claude`` -> ``~/.claude/projects/<encoded-cwd>/<uuid>.jsonl``
+    - ``codex``  -> ``~/.codex/sessions/**/rollout-*.jsonl`` matched by ``payload.cwd``
+    """
+    agent = normalize_agent(agent)
+    if agent == AGENT_CODEX:
+        return _list_codex_session_files(cwd)
+    return _list_claude_session_files(cwd)
+
+
+def session_id_from_path(path: Path, agent: str = AGENT_CLAUDE) -> str:
+    """Extract a resumable session id from one session file.
+
+    Claude: the file is named ``<uuid>.jsonl`` so the stem *is* the id.
+    Codex:  the file is named ``rollout-<timestamp>-<uuid>.jsonl`` but
+            the canonical id lives in ``payload.id`` of the first line.
+    """
+    agent = normalize_agent(agent)
+    if agent == AGENT_CODEX:
+        meta = _read_codex_session_meta(path)
+        if meta:
+            payload = meta.get("payload") or {}
+            if isinstance(payload, dict):
+                sid = str(payload.get("id") or "").strip()
+                if sid:
+                    return sid
+        return ""
+    return path.stem  # claude: <uuid>.jsonl
 
 
 # --- Git / worktree helpers -------------------------------------------------
@@ -1063,30 +1260,47 @@ def worktree_status(wt: Path) -> dict[str, Any] | None:
 
 
 def list_task_worktree_statuses(project_root: Path, slug: str) -> list[dict[str, Any]]:
-    """Status snapshot for every worktree currently tracked by the task."""
+    """Status snapshot for every worktree currently tracked by the task.
+
+    Runs ``git status`` for every worktree concurrently. Each git call
+    shells out and typically takes 100-500 ms on a large repo, so for
+    tasks with multiple worktrees this is a near-linear speedup over the
+    previous serial loop.
+    """
     meta = read_meta(project_root, slug)
     if meta is None:
         return []
-    out: list[dict[str, Any]] = []
-    for p_str in meta.worktrees:
+    paths = list(meta.worktrees)
+    if not paths:
+        return []
+
+    def _safe_status(p_str: str) -> dict[str, Any]:
         s = worktree_status(Path(p_str))
-        if s is None:
-            s = {
-                "path": p_str,
-                "branch": "",
-                "upstream": "",
-                "has_remote": False,
-                "ahead": 0,
-                "behind": 0,
-                "staged": 0,
-                "unstaged": 0,
-                "untracked": 0,
-                "clean": False,
-                "dirty_count": 0,
-                "error": "worktree directory missing",
-            }
-        out.append(s)
-    return out
+        if s is not None:
+            return s
+        return {
+            "path": p_str,
+            "branch": "",
+            "upstream": "",
+            "has_remote": False,
+            "ahead": 0,
+            "behind": 0,
+            "staged": 0,
+            "unstaged": 0,
+            "untracked": 0,
+            "clean": False,
+            "dirty_count": 0,
+            "error": "worktree directory missing",
+        }
+
+    # Cap the pool so we don't fork unbounded git processes if a task
+    # somehow ends up with dozens of worktrees - 8 is plenty for typical
+    # multi-repo tasks (2-4 worktrees).
+    if len(paths) == 1:
+        return [_safe_status(paths[0])]
+    max_workers = min(len(paths), 8)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        return list(pool.map(_safe_status, paths))
 
 
 def push_worktree_branch(wt: Path) -> dict[str, Any]:

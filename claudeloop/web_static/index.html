@@ -86,7 +86,7 @@
         <nav class="tabs" id="main-tabs" role="tablist"></nav>
 
         <section class="tab-panel active" data-panel="claude" role="tabpanel">
-          <p class="tab-panel__hint">A dedicated tmux + Claude Code pane bound to this task's worktree. The first launch pastes a deep-interview prompt that writes PLAN.md; you can <code>/goal</code> in the same session afterwards.</p>
+          <p class="tab-panel__hint">A dedicated tmux + Claude Code pane bound to this task's worktree. The first launch pastes a deep-interview prompt that writes PLAN.md (the only per-task file); you can <code>/goal</code> in the same session afterwards.</p>
           <input type="hidden" id="inp-interview-target" />
           <div class="tab-action-row">
             <button type="button" class="btn btn--primary" id="btn-interview-start">Start Claude</button>
@@ -94,6 +94,14 @@
             <span class="action-hint">Worktree and session info below; the tmux pane lives even if you close the browser.</span>
           </div>
           <div class="pane-card claude-info" id="claude-info-card">
+            <div class="claude-info__row">
+              <span class="claude-info__label">Agent</span>
+              <select id="claude-info-agent" class="claude-info__agent">
+                <option value="claude">Claude</option>
+                <option value="codex">Codex</option>
+              </select>
+              <span class="claude-info__hint" id="claude-info-agent-hint">stop the pane before switching agent</span>
+            </div>
             <div class="claude-info__row claude-info__row--worktrees">
               <span class="claude-info__label">Worktrees</span>
               <div class="claude-info__worktrees" id="claude-info-worktree-list"></div>
@@ -146,7 +154,11 @@
             <span class="pane-actions__hint">Enter inserts a newline. Click Send + Enter to submit; Claude uses effort=max.</span>
           </div>
           <div class="interview-markdown">
-            <p class="tab-panel__hint">INTERVIEW.md - notes and decisions from the Claude pane.</p>
+            <div class="interview-md-bar">
+              <label for="interview-md-select" class="interview-md-bar__label">Viewing</label>
+              <select id="interview-md-select" class="interview-md-select" aria-label="Top-level markdown file to view"></select>
+              <span class="tab-panel__hint interview-md-bar__hint" id="interview-md-hint">Read-only here. Edit PLAN.md in the <strong>PLAN.md</strong> tab.</span>
+            </div>
             <div class="markdown-workbench markdown-workbench--interview">
               <div class="markdown-pane">
                 <div class="pane-label">Raw Markdown</div>
@@ -198,6 +210,19 @@
         <input type="text" id="new-title" placeholder="Example: xorl1" />
         <label>General goal</label>
         <textarea id="new-goal" rows="5" placeholder="Write the general goal first; deep-interview will ask about anything unclear."></textarea>
+        <label class="agent-picker__label">Agent</label>
+        <div class="agent-picker" id="new-agent" role="radiogroup" aria-label="Agent">
+          <label class="agent-picker__opt">
+            <input type="radio" name="new-agent-radio" value="claude" checked />
+            <span class="agent-picker__name">Claude</span>
+            <span class="agent-picker__hint"><code>claude</code> CLI · resume by UUID</span>
+          </label>
+          <label class="agent-picker__opt">
+            <input type="radio" name="new-agent-radio" value="codex" />
+            <span class="agent-picker__name">Codex</span>
+            <span class="agent-picker__hint"><code>codex</code> CLI · <code>codex resume &lt;id&gt;</code></span>
+          </label>
+        </div>
       </div>
 
       <div class="modal-card__footer">

@@ -13,10 +13,12 @@ from claudeloop.rud_task import (
     create_task,
     delete_task,
     list_session_files,
+    list_task_markdown_files,
     path_under_task,
     project_notes_path,
     read_meta,
     read_project_notes,
+    read_task_markdown_file,
     read_template,
     session_id_from_path,
     slugify,
@@ -52,8 +54,14 @@ def test_create_task_seeds_plan_only(tmp_path: Path) -> None:
     assert meta.slug.startswith("my-task")
     root = task_root(tmp_path, meta.slug)
     assert (root / PLAN).is_file()
-    # NOTES.md is no longer per-task.
+    # PLAN.md is the only per-task markdown file. NOTES.md is project-scoped
+    # (lives at <project>/.RUD/NOTES.md), and INTERVIEW.md / TASK_PROMPT.md /
+    # SUCCESS_CONDITION.md are no longer seeded.
     assert not (root / "NOTES.md").exists()
+    assert not (root / "INTERVIEW.md").exists()
+    assert not (root / "interview.md").exists()
+    assert not (root / "TASK_PROMPT.md").exists()
+    assert not (root / "SUCCESS_CONDITION.md").exists()
     m2 = read_meta(tmp_path, meta.slug)
     assert m2 is not None
     assert m2.skills_path == str(skills.resolve())
@@ -73,6 +81,65 @@ def test_write_template_rejects_disallowed_names(tmp_path: Path) -> None:
     assert write_template(tmp_path, meta.slug, "NOTES.md", "x") is False
     assert write_template(tmp_path, meta.slug, "TASK_PROMPT.md", "x") is False
     assert write_template(tmp_path, meta.slug, "evil.md", "x") is False
+
+
+def test_list_task_markdown_files_returns_plan_first(tmp_path: Path) -> None:
+    meta = create_task(tmp_path, "mds", "goal", skills_path=None, auto_worktree=False)
+    root = task_root(tmp_path, meta.slug)
+    (root / "review.md").write_text("# review", encoding="utf-8")
+    (root / "Notes.md").write_text("# notes", encoding="utf-8")
+    # Non-markdown and nested files must be excluded.
+    (root / "stuff.txt").write_text("ignore me", encoding="utf-8")
+    nested = root / "work" / "subrepo"
+    nested.mkdir(parents=True)
+    (nested / "DEEP.md").write_text("# deep", encoding="utf-8")
+
+    names = list_task_markdown_files(tmp_path, meta.slug)
+    # PLAN.md must be first, the rest sorted case-insensitively, and the
+    # nested DEEP.md / non-markdown stuff.txt must not appear.
+    assert names[0] == "PLAN.md"
+    assert names[1:] == ["Notes.md", "review.md"]
+    assert "stuff.txt" not in names
+    assert "DEEP.md" not in names
+
+
+def test_list_task_markdown_files_without_plan(tmp_path: Path) -> None:
+    meta = create_task(tmp_path, "noplan", "goal", skills_path=None, auto_worktree=False)
+    root = task_root(tmp_path, meta.slug)
+    (root / PLAN).unlink()
+    (root / "alpha.md").write_text("a", encoding="utf-8")
+    (root / "beta.md").write_text("b", encoding="utf-8")
+    # PLAN.md isn't on disk anymore; we should just get the other two
+    # in case-insensitive sorted order with no special PLAN.md slot.
+    assert list_task_markdown_files(tmp_path, meta.slug) == ["alpha.md", "beta.md"]
+
+
+def test_read_task_markdown_file_round_trip(tmp_path: Path) -> None:
+    meta = create_task(tmp_path, "rt", "goal", skills_path=None, auto_worktree=False)
+    root = task_root(tmp_path, meta.slug)
+    (root / "review.md").write_text("hello review", encoding="utf-8")
+    assert read_task_markdown_file(tmp_path, meta.slug, "review.md") == "hello review"
+    # PLAN.md was seeded; readable too.
+    assert isinstance(read_task_markdown_file(tmp_path, meta.slug, PLAN), str)
+
+
+def test_read_task_markdown_file_rejects_unsafe_names(tmp_path: Path) -> None:
+    meta = create_task(tmp_path, "safe", "goal", skills_path=None, auto_worktree=False)
+    # Path traversal must be blocked even if the resolved file exists.
+    outside = tmp_path / "secret.md"
+    outside.write_text("nope", encoding="utf-8")
+    assert read_task_markdown_file(tmp_path, meta.slug, "../secret.md") is None
+    assert read_task_markdown_file(tmp_path, meta.slug, "../../etc/passwd") is None
+    assert read_task_markdown_file(tmp_path, meta.slug, "work/inner.md") is None
+    # Non-markdown extensions are refused.
+    (task_root(tmp_path, meta.slug) / "task.json").write_text("{}", encoding="utf-8")
+    assert read_task_markdown_file(tmp_path, meta.slug, "task.json") is None
+    # Missing files return None instead of raising.
+    assert read_task_markdown_file(tmp_path, meta.slug, "ghost.md") is None
+    # Empty / dot names rejected before any filesystem lookup.
+    assert read_task_markdown_file(tmp_path, meta.slug, "") is None
+    assert read_task_markdown_file(tmp_path, meta.slug, ".") is None
+    assert read_task_markdown_file(tmp_path, meta.slug, "..") is None
 
 
 def test_project_notes_round_trip(tmp_path: Path) -> None:
@@ -452,6 +519,120 @@ def test_list_task_worktree_statuses(tmp_path: Path) -> None:
     for s in statuses:
         assert s["branch"] == f"zhongzhu/{meta.slug}"
         assert s["clean"] is True
+
+
+def test_create_task_defaults_to_claude_agent(tmp_path: Path) -> None:
+    meta = create_task(tmp_path, "ag1", "g", skills_path=None, auto_worktree=False)
+    assert meta.agent == "claude"
+    assert read_meta(tmp_path, meta.slug).agent == "claude"
+
+
+def test_create_task_with_codex_agent(tmp_path: Path) -> None:
+    meta = create_task(
+        tmp_path,
+        "ag2",
+        "g",
+        skills_path=None,
+        agent="codex",
+        auto_worktree=False,
+    )
+    assert meta.agent == "codex"
+    assert read_meta(tmp_path, meta.slug).agent == "codex"
+
+
+def test_normalize_and_label_agent() -> None:
+    from claudeloop.rud_task import agent_label, normalize_agent
+
+    assert normalize_agent("claude") == "claude"
+    assert normalize_agent("CODEX") == "codex"
+    assert normalize_agent("") == "claude"
+    assert normalize_agent("gpt-4") == "claude"  # unknown -> default
+    assert agent_label("claude") == "Claude"
+    assert agent_label("codex") == "Codex"
+    assert agent_label("nonsense") == "Claude"
+
+
+def test_build_agent_command_claude() -> None:
+    from claudeloop.rud_task import build_agent_command
+
+    cmd = build_agent_command("claude")
+    assert cmd[0] == "claude"
+    assert "--model" in cmd
+    assert "--dangerously-skip-permissions" in cmd
+    assert "--effort" in cmd and "max" in cmd
+    assert "--resume" not in cmd
+
+    cmd_resume = build_agent_command("claude", model="m1", resume_session_id="abc-123")
+    assert cmd_resume[cmd_resume.index("--model") + 1] == "m1"
+    assert cmd_resume[cmd_resume.index("--resume") + 1] == "abc-123"
+
+
+def test_build_agent_command_codex() -> None:
+    from claudeloop.rud_task import build_agent_command
+
+    cmd = build_agent_command("codex")
+    assert cmd == ["codex"]
+
+    cmd_model = build_agent_command("codex", model="o3")
+    assert cmd_model == ["codex", "-c", "model=o3"]
+
+    cmd_resume = build_agent_command("codex", resume_session_id="019e296e-…")
+    assert cmd_resume[:3] == ["codex", "resume", "019e296e-…"]
+
+    cmd_both = build_agent_command("codex", model="o3", resume_session_id="abc")
+    assert cmd_both == ["codex", "resume", "abc", "-c", "model=o3"]
+
+
+def test_meta_migrates_old_task_json_without_agent(tmp_path: Path) -> None:
+    """task.json from before the agent field should default agent to claude."""
+    meta = create_task(tmp_path, "lg", "g", skills_path=None, auto_worktree=False)
+    meta_path = task_root(tmp_path, meta.slug) / "task.json"
+    import json
+    raw = json.loads(meta_path.read_text(encoding="utf-8"))
+    raw.pop("agent", None)
+    meta_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    reloaded = read_meta(tmp_path, meta.slug)
+    assert reloaded is not None
+    assert reloaded.agent == "claude"
+
+
+def test_list_session_files_dispatches_to_codex(tmp_path: Path, monkeypatch) -> None:
+    """Codex sessions are matched by ``payload.cwd`` in the rollout file."""
+    from claudeloop.rud_task import (
+        list_session_files,
+        session_id_from_path,
+    )
+
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(rud_task.Path, "home", classmethod(lambda cls: fake_home))
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    sessions_dir = fake_home / ".codex" / "sessions" / "2026" / "05" / "28"
+    sessions_dir.mkdir(parents=True)
+    # One session matching our cwd
+    match_path = sessions_dir / "rollout-2026-05-28T01-23-45-aaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+    import json as _json
+    match_path.write_text(
+        _json.dumps({
+            "type": "session_meta",
+            "payload": {"id": "aaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cwd": str(cwd.resolve())},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    # One session from a different cwd
+    other_path = sessions_dir / "rollout-2026-05-28T02-00-00-zzzz.jsonl"
+    other_path.write_text(
+        _json.dumps({
+            "type": "session_meta",
+            "payload": {"id": "zzzz", "cwd": "/somewhere/else"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    files = list_session_files(cwd, "codex")
+    assert [p.name for p in files] == [match_path.name]
+    assert session_id_from_path(files[0], "codex") == "aaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    # Claude lookup for the same cwd returns nothing (no ~/.claude/projects).
+    assert list_session_files(cwd, "claude") == []
 
 
 def test_detect_worktree_clears_stale_path(tmp_path: Path) -> None:
