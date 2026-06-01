@@ -1,23 +1,27 @@
 # K8S
 
-请你先整理组织下我们的plan,task,success，现在写的比较混乱，保留总结重要内容。然后记得加入一下内容：
+在开始实现或 review 前，先把任务目标、当前 plan、成功标准整理清楚，只保留对后续执行有用的信息。默认遵守下面的工作习惯：
 
-- Use the task worktree for experiments and PR review. If the worktree already exists, reuse it.
-- Prefer Kubernetes for tests/evals/training so the local machine stays free.
-- Use pods/jobs/nodes to scale experiments, and clean up old completed or failed jobs when done.
-- Save all results, logs, configs, and notes under the task directory.
-- Use wandb for run tracking; the user is already logged in.
-- Use the existing `HF_TOKEN` environment variable; never write the token value into files or commits.
-- Use `/shared/huggingface` for Hugging Face cache (`HF_HOME`, `TRANSFORMERS_CACHE`, `HF_DATASETS_CACHE`)! DO NOT USE ~/.cache/huggingface!
-- some node NCCL/IB/GPU might be inhealthy, the cluster has these information, please be careful to check
-- branch/worktree name use zhongzhu/xxxx as the name, also for PR, etc.
-- don't create PR, review by your self; just leave everything in the local worktree.
-- for review, list review like "- code line xxx comment review xxx" simple & clean
-- don't make author / co-author as claude / cursor or ai agent.
-- 如果在claudeloop文件夹中 记得更新文件夹中的 PLAN.md markdown，简明扼要地说明现在为止的所有进度。只记录有用的，无用的请不要记录。我们会根据PLAN来汇总进度和成果。
-- 如果本机local 有free GPU 没有人使用的 你可以尝试使用。
-- 如果是生成review的任务 请你生成一个REVIEW.md 和 PLAN.md 同一级 markdown文件，里面包含review的详细内容，每一bullet point代表一个review comment 写清楚行数在哪，应该怎么改进。尽量写的都是一些关键影响会error的line of code。
-- 不要提交commit，code change保留在本地；我可以在github changes一眼看到有哪些code changes能够更好地帮助我来reivew。
+1. Task state and documentation
+- If working inside a claudeloop task, keep `PLAN.md` updated with current useful progress, decisions, blockers, and next steps. Do not record noisy or obsolete details.
+- Save useful results, logs, configs, and notes under the task directory. Keep them concise and organized.
+- If the task is a code review, create a sibling `REVIEW.md` next to `PLAN.md`. Each bullet should be one concrete review comment with file/line context, the issue, and the recommended fix. Focus on correctness bugs, likely runtime errors, regressions, and important missing tests.
+
+2. Code, worktrees, and branches
+- Use the task worktree for all experiments, fixes, and PR reviews. Reuse an existing worktree if it already exists.
+- Name branches, worktrees, and related review branches with the `zhongzhu/<task-name>` convention.
+- Do not create PRs unless explicitly asked. Leave code changes in the local worktree so the user can review them directly in GitHub/Cursor changes.
+- Do not create commits unless explicitly asked. If asked to commit, do not add Claude/Cursor/AI as author or co-author.
+
+3. Experiments and compute
+- Prefer Kubernetes for tests, evals, and training so the local machine stays responsive. Use pods/jobs/nodes as needed, and clean up old completed or failed jobs after use.
+- Be careful with flaky or unhealthy cluster resources: some nodes may have NCCL, IB, or GPU issues. Check node/job status when results look suspicious.
+- If a local GPU is free and safe to use, it is okay to run lightweight checks locally; otherwise prefer Kubernetes.
+- Use wandb for experiment tracking; the user is already logged in.
+
+4. Secrets and caches
+- Use the existing `HF_TOKEN` environment variable only. Never write token values into files, logs, prompts, commits, or PR text.
+- Use `/shared/huggingface` as the Hugging Face cache location (`HF_HOME`, `TRANSFORMERS_CACHE`, `HF_DATASETS_CACHE`). Do not use `~/.cache/huggingface`.
 
 # CLAUDE.md
 

@@ -972,7 +972,7 @@ def make_handler(
                     st, b, h = _json_bytes({"error": "title and general_goal required"}, 400)
                     self._send(st, b, h)
                     return
-                skills_path = bundled_skills_path().resolve()
+                skills_path = default_skills.resolve() if default_skills.is_file() else bundled_skills_path().resolve()
                 raw_sp = body.get("skills_path")
                 if raw_sp and str(raw_sp).strip():
                     cand = Path(str(raw_sp)).expanduser().resolve()
