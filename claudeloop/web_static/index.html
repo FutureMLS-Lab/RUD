@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>claudeloop</title>
+  <title>Repeat Until Done (RUD)</title>
   <link rel="stylesheet" href="/static/app.css" />
 </head>
 <body>
@@ -15,7 +15,7 @@
         <span class="icon-btn__bar"></span>
       </button>
       <div class="brand">
-        <span class="brand__name">claudeloop</span>
+        <span class="brand__name">Repeat Until Done (RUD)</span>
         <span class="brand__tag">task console</span>
       </div>
     </div>
@@ -47,7 +47,7 @@
           <h2 class="sidebar__heading">tmux</h2>
           <button type="button" class="btn btn--ghost btn--sm" id="btn-tmux-refresh">Refresh</button>
         </div>
-        <p class="sidebar__hint">Claudeloop interview sessions for the <strong>selected</strong> project.</p>
+        <p class="sidebar__hint">RUD agent sessions for the <strong>selected</strong> project.</p>
         <ul class="tmux-list" id="tmux-sessions"></ul>
       </section>
 
@@ -86,12 +86,20 @@
         <nav class="tabs" id="main-tabs" role="tablist"></nav>
 
         <section class="tab-panel active" data-panel="claude" role="tabpanel">
-          <p class="tab-panel__hint">A dedicated tmux + Claude Code pane bound to this task's worktree. The first launch pastes a deep-interview prompt that writes PLAN.md (the only per-task file); you can <code>/goal</code> in the same session afterwards.</p>
+          <p class="tab-panel__hint">RUD loop: start from the general goal, interview into PLAN.md, run <code>/goal</code> against PLAN.md, then write progress and results back into PLAN.md.</p>
           <input type="hidden" id="inp-interview-target" />
           <div class="tab-action-row">
             <button type="button" class="btn btn--primary" id="btn-interview-start">Start Claude</button>
+            <button type="button" class="btn" id="btn-interview-paste">Paste prompt</button>
             <button type="button" class="btn btn--danger" id="btn-interview-stop">Stop Claude</button>
             <span class="action-hint">Worktree and session info below; the tmux pane lives even if you close the browser.</span>
+          </div>
+          <div class="rud-flow-row" aria-label="RUD workflow shortcuts">
+            <span class="rud-flow-row__label">RUD flow</span>
+            <button type="button" class="btn btn--sm" id="btn-write-plan">1. Write PLAN.md</button>
+            <button type="button" class="btn btn--primary btn--sm" id="btn-run-goal">2. Run /goal</button>
+            <button type="button" class="btn btn--sm" id="btn-write-result">3. Write result</button>
+            <span class="rud-flow-row__hint">Interview → PLAN.md → /goal → results back to PLAN.md</span>
           </div>
           <div class="pane-card claude-info" id="claude-info-card">
             <div class="claude-info__row">

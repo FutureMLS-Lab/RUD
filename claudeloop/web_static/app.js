@@ -38,6 +38,10 @@ const STATE = {
   projectId: null,
   projects: [],
   tasks: [],
+  currentMeta: null,
+  worktreeStatuses: [],
+  taskRoot: '',
+  planPath: '',
   launchRoot: '',
   launchRootChildren: [],
   paneTimer: null,
@@ -49,6 +53,15 @@ const STATE = {
   notesSaving: false,
   planDirty: false,
   taskFilter: '',
+  pollInFlight: {
+    capture: false,
+    templates: false,
+    sessions: false,
+  },
+  // Per-task unsent text in the terminal input box. Keep this client-side
+  // only: drafts can contain arbitrary user text and shouldn't be written
+  // into task metadata or markdown files.
+  paneDrafts: {},
   // Embedded read-only markdown viewer on the Claude tab. The picker
   // lets the user flip between any top-level *.md file in the task root;
   // PLAN.md is the default.
@@ -79,7 +92,7 @@ async function apiNoProject(path, opts = {}) {
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = { error: text }; }
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) throw makeApiError(res, data);
   return data;
 }
 
@@ -93,8 +106,43 @@ async function api(path, opts = {}) {
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = { error: text }; }
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) throw makeApiError(res, data);
   return data;
+}
+
+function makeApiError(res, data) {
+  const err = new Error((data && data.error) || res.statusText || `HTTP ${res.status}`);
+  err.status = res.status;
+  err.body = data;
+  return err;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientApiError(err) {
+  // These usually mean the local web server is restarting, the proxy timed
+  // out, or a long-running tmux/git request temporarily blocked the route.
+  // Retrying is safe for GETs and avoids surfacing noisy "Bad Gateway" text
+  // in the task terminal.
+  return [502, 503, 504].includes(Number(err && err.status));
+}
+
+async function apiWithRetry(path, opts = {}, retryOpts = {}) {
+  const attempts = retryOpts.attempts ?? 3;
+  const delayMs = retryOpts.delayMs ?? 250;
+  let lastErr;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await api(path, opts);
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientApiError(err) || i === attempts - 1) break;
+      await sleep(delayMs * (i + 1));
+    }
+  }
+  throw lastErr;
 }
 
 function $(sel) { return document.querySelector(sel); }
@@ -912,17 +960,26 @@ function renderTasksFromState() {
 }
 
 function clearTaskSelection() {
+  savePaneDraftForTask(STATE.slug);
   STATE.slug = null;
+  STATE.currentMeta = null;
+  STATE.worktreeStatuses = [];
+  STATE.taskRoot = '';
+  STATE.planPath = '';
   if (STATE.paneTimer) {
     clearInterval(STATE.paneTimer);
     STATE.paneTimer = null;
   }
   document.querySelectorAll('#task-list li').forEach((li) => li.classList.remove('active'));
+  restorePaneDraftForTask(null);
   $('#task-view').hidden = true;
   $('#task-empty').hidden = false;
 }
 
 async function selectTask(slug) {
+  if (STATE.slug && STATE.slug !== slug) {
+    savePaneDraftForTask(STATE.slug);
+  }
   STATE.slug = slug;
   document.querySelectorAll('#task-list li').forEach((li) => {
     li.classList.toggle('active', li.dataset.slug === slug);
@@ -936,6 +993,8 @@ async function selectTask(slug) {
   // enrichment + markdown contents) then enriches the view in-place.
   const cached = (STATE.tasks || []).find((t) => t.slug === slug) || null;
   if (cached) {
+    STATE.currentMeta = cached;
+    STATE.worktreeStatuses = [];
     $('#task-empty').hidden = true;
     $('#task-view').hidden = false;
     $('#task-title').textContent = cached.title || slug;
@@ -950,6 +1009,7 @@ async function selectTask(slug) {
     // doesn't briefly flash through.
     $('#editor-plan').value = '';
     $('#editor-interview').value = '';
+    restorePaneDraftForTask(slug);
     STATE.interviewMdContents = {};
     STATE.previewCache = {};
     applyAgentLabels(cached);
@@ -959,11 +1019,17 @@ async function selectTask(slug) {
 
   let d;
   try {
-    d = await api('/api/tasks/' + encodeURIComponent(slug));
+    d = await apiWithRetry('/api/tasks/' + encodeURIComponent(slug), {}, { attempts: 4, delayMs: 300 });
   } catch (err) {
     if (STATE.slug !== slug) return;
-    setTmuxOutputText(`Failed to load task: ${err.message || err}`);
-    throw err;
+    console.debug('selectTask detail load failed', err);
+    const msg = isTransientApiError(err)
+      ? 'Temporary gateway error while refreshing task details; kept cached task view.'
+      : `Failed to refresh task details: ${err.message || err}`;
+    const backend = document.getElementById('task-backend');
+    if (backend && cached) backend.textContent = `${backend.textContent.replace(/ · refresh failed.*$/, '')} · refresh failed`;
+    if (!cached) setTmuxOutputText(msg);
+    return;
   }
   // The user may have clicked a different task while we were awaiting -
   // abort cleanly so we don't trample the newer selection.
@@ -976,6 +1042,10 @@ async function selectTask(slug) {
   $('#task-slug').textContent = d.meta.slug;
   $('#task-backend').textContent = `${agentLabel(d.meta.agent)}${d.meta.interview_model ? ' · ' + d.meta.interview_model : ''}`;
   $('#task-goal').textContent = d.meta.general_goal || '';
+  STATE.currentMeta = d.meta || null;
+  STATE.worktreeStatuses = d.worktree_statuses || [];
+  STATE.taskRoot = d.task_root || '';
+  STATE.planPath = d.plan_path || '';
   const planText = d.templates[FILES.plan] || '';
   $('#editor-plan').value = planText;
   applyInterviewMdPayload(d);
@@ -985,7 +1055,8 @@ async function selectTask(slug) {
   if (!d.meta.tmux_interview_target) {
     setTmuxOutputText('Click Start Claude to launch a tmux pane in the worktree.');
   }
-  renderClaudeInfo(d.meta, d.claude || null, d.worktree_statuses || []);
+  restorePaneDraftForTask(slug);
+  renderClaudeInfo(d.meta, d.claude || null, STATE.worktreeStatuses);
   applyAgentLabels(d.meta || {});
   resetPlanDirty();
   buildTabs(d.meta);
@@ -993,7 +1064,7 @@ async function selectTask(slug) {
   // by default); calling showPanel again would re-trigger the deferred
   // refresh callbacks unnecessarily.
   if (!cached) showPanel(DEFAULT_TAB);
-  refreshInterviewPreview();
+  refreshInterviewPreview(true);
   refreshClaudeSessions();
   startPanePolling();
 }
@@ -1001,8 +1072,10 @@ async function selectTask(slug) {
 function applyAgentLabels(meta) {
   const label = agentLabel(meta.agent);
   const startBtn = document.getElementById('btn-interview-start');
+  const pasteBtn = document.getElementById('btn-interview-paste');
   const stopBtn = document.getElementById('btn-interview-stop');
   if (startBtn) startBtn.textContent = `Start ${label}`;
+  if (pasteBtn) pasteBtn.textContent = `Paste ${label} prompt`;
   if (stopBtn) stopBtn.textContent = `Stop ${label}`;
   const heading = document.querySelector('.tab-panel[data-panel="claude"] .terminal-card__bar h4');
   if (heading) heading.textContent = `${label} Terminal`;
@@ -1043,6 +1116,33 @@ async function onAgentChange(ev) {
   }
 }
 
+// ===== Per-task terminal drafts =====
+
+function paneDraftKey(slug = STATE.slug) {
+  if (!slug) return '';
+  // Slugs can repeat across projects, so include the active project id.
+  return `${STATE.projectId || 'default'}::${slug}`;
+}
+
+function savePaneDraftForTask(slug = STATE.slug) {
+  const input = document.getElementById('interview-in');
+  const key = paneDraftKey(slug);
+  if (!input || !key) return;
+  STATE.paneDrafts[key] = input.value;
+}
+
+function restorePaneDraftForTask(slug = STATE.slug) {
+  const input = document.getElementById('interview-in');
+  if (!input) return;
+  const key = paneDraftKey(slug);
+  input.value = key ? (STATE.paneDrafts[key] || '') : '';
+}
+
+function clearPaneDraftForTask(slug = STATE.slug) {
+  const key = paneDraftKey(slug);
+  if (key) STATE.paneDrafts[key] = '';
+}
+
 async function deleteSelectedTask() {
   if (!STATE.slug) return;
   const slug = STATE.slug;
@@ -1069,24 +1169,38 @@ async function deleteSelectedTask() {
 
 async function refreshTaskTemplates() {
   if (!STATE.slug) return;
-  const d = await api('/api/tasks/' + encodeURIComponent(STATE.slug));
-  const planText = d.templates[FILES.plan] || '';
-  // The dedicated PLAN.md editor is always bound to PLAN.md; the
-  // embedded read-only viewer on the Claude tab follows whichever file
-  // the user picked in the dropdown.
-  const planEl = $('#editor-plan');
-  const active = document.activeElement;
-  let changed = false;
-  if (planEl && planEl !== active && planEl.value !== planText) {
-    planEl.value = planText;
-    STATE.previewCache.plan = null;
-    changed = true;
+  if (STATE.pollInFlight.templates) return;
+  const slug = STATE.slug;
+  STATE.pollInFlight.templates = true;
+  try {
+    const d = await apiWithRetry('/api/tasks/' + encodeURIComponent(slug), {}, { attempts: 2, delayMs: 300 });
+    if (STATE.slug !== slug) return;
+    STATE.currentMeta = d.meta || STATE.currentMeta;
+    STATE.worktreeStatuses = d.worktree_statuses || STATE.worktreeStatuses || [];
+    STATE.taskRoot = d.task_root || STATE.taskRoot || '';
+    STATE.planPath = d.plan_path || STATE.planPath || '';
+    const planText = d.templates[FILES.plan] || '';
+    // The dedicated PLAN.md editor is always bound to PLAN.md; the
+    // embedded read-only viewer on the Claude tab follows whichever file
+    // the user picked in the dropdown.
+    const planEl = $('#editor-plan');
+    const active = document.activeElement;
+    let changed = false;
+    if (planEl && planEl !== active && planEl.value !== planText) {
+      planEl.value = planText;
+      STATE.previewCache.plan = null;
+      changed = true;
+    }
+    // Sync the picker payload (file list + content) and reload the embed
+    // from the freshly fetched contents.
+    applyInterviewMdPayload(d);
+    if (changed) updateActiveMarkdownPreview();
+    if (d.meta) renderClaudeInfo(d.meta, d.claude || null, STATE.worktreeStatuses);
+  } catch (err) {
+    console.debug('refreshTaskTemplates failed', err);
+  } finally {
+    STATE.pollInFlight.templates = false;
   }
-  // Sync the picker payload (file list + content) and reload the embed
-  // from the freshly fetched contents.
-  applyInterviewMdPayload(d);
-  if (changed) updateActiveMarkdownPreview();
-  if (d.meta) renderClaudeInfo(d.meta, d.claude || null, d.worktree_statuses || []);
 }
 
 async function saveTemplate(name, textareaId, statusId) {
@@ -1133,14 +1247,23 @@ function scrollTmuxOutputToBottom() {
   });
 }
 
-async function refreshInterviewPreview() {
+async function refreshInterviewPreview(force = false) {
   const target = $('#inp-interview-target').value.trim();
   if (!target) return;
+  if (!force && STATE.pollInFlight.capture) return;
+  STATE.pollInFlight.capture = true;
   try {
     const d = await api('/api/tmux/capture?target=' + encodeURIComponent(target) + '&lines=200');
+    if ($('#inp-interview-target').value.trim() !== target) return;
     setTmuxOutputText(d.ok ? d.text : (d.error || '(error)'));
   } catch (err) {
-    setTmuxOutputText(err.message);
+    if (isTransientApiError(err)) {
+      console.debug('tmux capture transient failure', err);
+    } else {
+      setTmuxOutputText(err.message);
+    }
+  } finally {
+    STATE.pollInFlight.capture = false;
   }
 }
 
@@ -1158,7 +1281,8 @@ async function sendPaneText(submit = false) {
     body: JSON.stringify({ target, text, submit }),
   });
   input.value = '';
-  await refreshInterviewPreview();
+  clearPaneDraftForTask();
+  await refreshInterviewPreview(true);
 }
 
 async function sendPaneKey(key) {
@@ -1171,7 +1295,7 @@ async function sendPaneKey(key) {
     method: 'POST',
     body: JSON.stringify({ target, key }),
   });
-  await refreshInterviewPreview();
+  await refreshInterviewPreview(true);
 }
 
 function startPanePolling() {
@@ -1180,7 +1304,7 @@ function startPanePolling() {
     if (!STATE.slug) return;
     const claudeTab = document.querySelector('.tab-panel[data-panel="claude"]');
     if (claudeTab && !claudeTab.hidden) {
-      refreshInterviewPreview();
+      refreshInterviewPreview(true);
       refreshTaskTemplates();
       refreshClaudeSessions();
     }
@@ -1190,16 +1314,111 @@ function startPanePolling() {
 async function startInterviewPane() {
   if (!STATE.slug) return;
   showPanel('interview');
-  setTmuxOutputText('Starting Claude Code interview pane…\nPrompt will be pasted automatically in about 5 seconds.');
+  setTmuxOutputText('Starting Claude Code interview pane…\nPrompt will be pasted automatically in a few seconds.');
   const r = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/interview/start', {
     method: 'POST',
     body: '{}',
   });
   $('#inp-interview-target').value = r.target || '';
   $('#interview-target-label').textContent = r.target || 'Not started';
-  await refreshInterviewPreview();
+  await refreshInterviewPreview(true);
   setTimeout(refreshInterviewPreview, 6500);
   setTimeout(refreshInterviewPreview, 10000);
+}
+
+async function pasteInterviewPrompt() {
+  if (!STATE.slug) return;
+  const target = $('#inp-interview-target').value.trim();
+  if (!target) {
+    alert('Start the Claude pane first.');
+    return;
+  }
+  const btn = document.getElementById('btn-interview-paste');
+  if (btn) btn.disabled = true;
+  try {
+    setTmuxOutputText('Pasting deep-interview prompt with general goal + skills…');
+    const r = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/claude/paste-prompt', {
+      method: 'POST',
+      body: '{}',
+    });
+    $('#inp-interview-target').value = r.target || target;
+    setTmuxOutputText(
+      `Pasted deep-interview prompt (${r.prompt_chars || 0} chars, skills: ${r.has_skills ? 'yes' : 'no'}).\n` +
+      'Refreshing terminal capture…'
+    );
+    setTimeout(refreshInterviewPreview, 700);
+    setTimeout(refreshInterviewPreview, 2000);
+  } catch (err) {
+    setTmuxOutputText(`Failed to paste prompt: ${err.message || err}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function currentPlanPathForPrompt() {
+  return STATE.planPath || `.RUD/${STATE.slug || '<task>'}/PLAN.md`;
+}
+
+async function sendWorkflowPrompt(kind, text) {
+  const target = $('#inp-interview-target').value.trim();
+  if (!STATE.slug || !target) {
+    alert('Start the Claude pane first.');
+    return;
+  }
+  try {
+    setTmuxOutputText(`Sending RUD workflow prompt: ${kind}…`);
+    await api('/api/tmux/send-text', {
+      method: 'POST',
+      body: JSON.stringify({ target, text, submit: true }),
+    });
+    setTimeout(() => refreshInterviewPreview(true), 500);
+    setTimeout(() => refreshTaskTemplates(), 1800);
+  } catch (err) {
+    setTmuxOutputText(`Failed to send ${kind}: ${err.message || err}`);
+  }
+}
+
+async function writeInterviewToPlan() {
+  const planPath = currentPlanPathForPrompt();
+  await sendWorkflowPrompt(
+    'write PLAN.md',
+    `Please finish the interview phase now and write the result directly into ${planPath}.
+
+Use this structure:
+- Goal
+- Context / Decisions from the interview
+- Constraints / non-goals
+- Acceptance criteria
+- Next steps as checkbox items
+- Progress Log / Result
+
+Keep it concise and executable. Do not create INTERVIEW.md, TODO.md, PROGRESS.md, or any other task-state file.`
+  );
+}
+
+async function runGoalFromPlan() {
+  const planPath = currentPlanPathForPrompt();
+  await sendWorkflowPrompt(
+    'run /goal',
+    `/goal Execute the RUD task plan in ${planPath}. Keep ${planPath} updated with useful progress, blockers, decisions, and final results. Do not create separate status files.`
+  );
+}
+
+async function writeResultToPlan() {
+  const planPath = currentPlanPathForPrompt();
+  await sendWorkflowPrompt(
+    'write result',
+    `Please summarize the current execution result back into ${planPath}.
+
+Update only useful information:
+- what was done
+- important decisions
+- test/eval results
+- blockers or follow-up work
+- final status
+
+Remove obsolete noisy details, but preserve unrelated prior sections. Do not create separate status files.`
+  );
 }
 
 // ===== Modals & sidebar =====
@@ -1844,12 +2063,21 @@ $('#worktree-modal').addEventListener('click', (event) => {
 
 async function refreshClaudeSessions() {
   if (!STATE.slug) return;
+  if (STATE.pollInFlight.sessions) return;
+  const slug = STATE.slug;
+  STATE.pollInFlight.sessions = true;
   try {
-    const d = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/claude-sessions');
-    const metaResp = await api('/api/tasks/' + encodeURIComponent(STATE.slug));
-    renderClaudeInfo(metaResp.meta, d);
+    const d = await apiWithRetry(
+      '/api/tasks/' + encodeURIComponent(slug) + '/claude-sessions',
+      {},
+      { attempts: 2, delayMs: 300 },
+    );
+    if (STATE.slug !== slug) return;
+    renderClaudeInfo(STATE.currentMeta || {}, d, STATE.worktreeStatuses || []);
   } catch (err) {
     console.debug('refreshClaudeSessions failed', err);
+  } finally {
+    STATE.pollInFlight.sessions = false;
   }
 }
 
@@ -1864,7 +2092,7 @@ async function resumeClaudeSession(sessionId) {
     if (!r.ok) throw new Error(r.error || 'resume failed');
     $('#inp-interview-target').value = r.target || '';
     setTmuxOutputText(`Resuming Claude session ${sessionId}\nNew tmux target: ${r.target || '(pending)'}`);
-    await refreshInterviewPreview();
+    await refreshInterviewPreview(true);
     await refreshClaudeSessions();
   } catch (err) {
     alert(err.message || 'resume failed');
@@ -1872,6 +2100,10 @@ async function resumeClaudeSession(sessionId) {
 }
 
 document.getElementById('btn-interview-start').addEventListener('click', startInterviewPane);
+document.getElementById('btn-interview-paste').addEventListener('click', pasteInterviewPrompt);
+document.getElementById('btn-write-plan').addEventListener('click', writeInterviewToPlan);
+document.getElementById('btn-run-goal').addEventListener('click', runGoalFromPlan);
+document.getElementById('btn-write-result').addEventListener('click', writeResultToPlan);
 
 document.getElementById('btn-interview-stop').addEventListener('click', async () => {
   if (!STATE.slug) return;
@@ -1886,6 +2118,10 @@ document.getElementById('btn-interview-stop').addEventListener('click', async ()
 });
 
 document.getElementById('btn-interview-send').addEventListener('click', () => sendPaneText(true));
+
+document.getElementById('interview-in').addEventListener('input', () => {
+  savePaneDraftForTask();
+});
 
 document.querySelectorAll('.pane-actions [data-key]').forEach((btn) => {
   btn.addEventListener('click', () => sendPaneKey(btn.dataset.key));

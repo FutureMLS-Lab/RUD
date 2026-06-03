@@ -30,7 +30,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -245,7 +245,11 @@ def _safe_static_path(static_root: Path, url_path: str) -> Path | None:
 # --- Claude prompt builder --------------------------------------------------
 
 
-def _build_claude_prompt(project_root: Path, slug: str) -> str:
+def _build_claude_prompt(
+    project_root: Path,
+    slug: str,
+    default_skills: Path | None = None,
+) -> str:
     meta = read_meta(project_root, slug)
     if not meta:
         return ""
@@ -253,10 +257,11 @@ def _build_claude_prompt(project_root: Path, slug: str) -> str:
     wt = task_worktree_path(project_root, slug)
     wt_line = f"Worktree (branch {meta.branch or '(unset)'}): {wt}" if wt else "Worktree: (none)"
     skills = ""
-    if meta.skills_path:
-        sp = Path(meta.skills_path)
-        if sp.is_file():
-            skills = sp.read_text(encoding="utf-8", errors="replace")[:12000]
+    skills_path = Path(meta.skills_path).expanduser() if meta.skills_path else None
+    if skills_path is None or not skills_path.is_file():
+        skills_path = default_skills if default_skills and default_skills.is_file() else bundled_skills_path()
+    if skills_path.is_file():
+        skills = skills_path.read_text(encoding="utf-8", errors="replace")[:12000]
     plan_path = td / PLAN
     return f"""You are running claudeloop's {agent_label(meta.agent)} pane for this task.
 
@@ -268,21 +273,33 @@ General goal:
 
 {wt_line}
 
+Default skills from:
+{skills_path}
+
 Default skills:
 ---
 {skills or "(none)"}
 ---
 
-How you should help the user:
-1. If {plan_path} is empty or vague, run a short deep-interview - ask one
-   high-leverage question at a time about scope, constraints, acceptance,
-   tests, non-goals. Capture all the decisions DIRECTLY in {plan_path};
-   do not create a separate notes / transcript / INTERVIEW file.
-2. Once the goal is clear, write or overwrite {plan_path} with:
-   - Goal, Constraints / non-goals, Acceptance, Next steps (checkbox list),
-     Progress Log section the user updates as they work.
-3. After PLAN.md is solid, the user will typically continue this same
-   session and drive the work with ``/goal`` against PLAN.md.
+RUD workflow:
+1. Start from the General goal above and run a short deep-interview. Ask
+   one high-leverage question at a time about scope, constraints,
+   acceptance, tests, risks, non-goals, and available worktrees.
+2. When the interview has enough information, write or overwrite
+   {plan_path} with a concise executable plan:
+   - Goal
+   - Context / Decisions from the interview
+   - Constraints / non-goals
+   - Acceptance criteria
+   - Next steps as a checkbox list
+   - Progress Log / Result section
+   Do not leave interview notes only in chat; the result of the interview
+   must be captured DIRECTLY in {plan_path}.
+3. After PLAN.md is solid, tell the user it is ready to run. The user can
+   click RUD's "Run /goal" button (or type /goal) to execute PLAN.md.
+4. While executing and when finished, keep writing useful progress,
+   blockers, decisions, and final results back into {plan_path}. Remove
+   obsolete/noisy details, but preserve unrelated prior sections.
 
 Behavioural constraints:
 - PLAN.md is the ONLY task-state file. Do not create INTERVIEW.md,
@@ -292,8 +309,8 @@ Behavioural constraints:
   (handled by the user via the web UI), not inside the worktree.
 
 Begin by reading {plan_path}, then either ask the first interview
-question or, if PLAN.md is already detailed enough, acknowledge that and
-wait for ``/goal``.
+question or, if PLAN.md is already detailed enough, acknowledge that it is
+ready and wait for the user to run ``/goal``.
 """
 
 
@@ -332,6 +349,7 @@ class ClaudeRegistry:
         slug: str,
         *,
         resume_session_id: str = "",
+        default_skills: Path | None = None,
     ) -> dict[str, Any]:
         meta = read_meta(project_root, slug)
         if not meta:
@@ -414,7 +432,7 @@ class ClaudeRegistry:
         else:
             threading.Thread(
                 target=self._paste_prompt_and_watch_session,
-                args=(project_root, slug, target, cwd, agent, existing_files),
+                args=(project_root, slug, target, cwd, agent, existing_files, default_skills),
                 daemon=True,
             ).start()
         return {
@@ -427,6 +445,26 @@ class ClaudeRegistry:
             "already_running": False,
             "prompt_pending": not bool(resume_session_id),
         }
+
+    def paste_prompt(
+        self,
+        project_root: Path,
+        project_id: str,
+        slug: str,
+        *,
+        default_skills: Path | None = None,
+    ) -> dict[str, Any]:
+        """Paste the task's deep-interview prompt into the running agent pane."""
+        meta = read_meta(project_root, slug)
+        if not meta:
+            return {"ok": False, "error": "Task not found"}
+        agent = normalize_agent(meta.agent)
+        session_name = _safe_claude_session_name(project_id, slug, agent)
+        target = (meta.tmux_interview_target or "").strip() or f"{session_name}:0.0"
+        if not self._tmux_session_exists(session_name):
+            return {"ok": False, "error": "Start the agent pane first"}
+        update_meta(project_root, slug, tmux_interview_target=target)
+        return self._paste_prompt_to_target(project_root, slug, target, default_skills=default_skills)
 
     def stop(self, project_root: Path, project_id: str, slug: str) -> dict[str, Any]:
         meta = read_meta(project_root, slug)
@@ -534,20 +572,46 @@ class ClaudeRegistry:
         cwd: Path,
         agent: str,
         existing_filenames: set[str],
+        default_skills: Path | None = None,
     ) -> None:
-        time.sleep(5)
-        self._wait_for_claude_ready(target, timeout=90.0)
-        prompt = _build_claude_prompt(project_root, slug)
-        if prompt:
-            ok, _ = send_pane_text(target, prompt, submit=False)
-            if ok:
-                # Both Claude Code and Codex need an Enter to submit after
-                # the bracketed paste; the extra Enter is a no-op for both.
-                time.sleep(0.3)
-                send_pane_key(target, "Enter")
-                time.sleep(0.1)
-                send_pane_key(target, "Enter")
+        # Give the CLI a short chance to paint its input prompt, but do not
+        # wait 90s: if the readiness heuristic misses a newer Claude/Codex UI
+        # the paste should still happen quickly.
+        time.sleep(2)
+        self._wait_for_claude_ready(target, timeout=12.0)
+        result = self._paste_prompt_to_target(project_root, slug, target, default_skills=default_skills)
+        if not result.get("ok"):
+            print(
+                f"[web] paste prompt failed slug={slug}: {result.get('error', 'unknown error')}",
+                flush=True,
+            )
         self._watch_for_session_id(project_root, slug, cwd, agent, existing_filenames)
+
+    def _paste_prompt_to_target(
+        self,
+        project_root: Path,
+        slug: str,
+        target: str,
+        *,
+        default_skills: Path | None = None,
+    ) -> dict[str, Any]:
+        prompt = _build_claude_prompt(project_root, slug, default_skills=default_skills)
+        if not prompt:
+            return {"ok": False, "error": "empty prompt", "target": target}
+        ok, err = send_pane_text(target, prompt, submit=True)
+        if ok:
+            # Some agent CLIs render bracketed paste but require one more Enter
+            # after the paste block; for CLIs that already submitted, this is
+            # harmless.
+            time.sleep(0.1)
+            send_pane_key(target, "Enter")
+            return {
+                "ok": True,
+                "target": target,
+                "prompt_chars": len(prompt),
+                "has_skills": "Default skills:\n---\n(none)" not in prompt,
+            }
+        return {"ok": False, "error": err or "paste failed", "target": target}
 
 
 # --- HTTP handler factory ---------------------------------------------------
@@ -921,6 +985,8 @@ def make_handler(
                 st, b, h = _json_bytes(
                     {
                         "meta": meta.to_dict(),
+                        "task_root": str(task_root(root, slug)),
+                        "plan_path": str(task_root(root, slug) / PLAN),
                         "templates": templates,
                         "task_markdown_files": md_names,
                         "claude": summary or {},
@@ -1142,7 +1208,7 @@ def make_handler(
                     st, b, h = _json_bytes({"error": "invalid slug"}, 400)
                     self._send(st, b, h)
                     return
-                result = claude_registry.start(root, project_id, slug)
+                result = claude_registry.start(root, project_id, slug, default_skills=default_skills)
                 print(
                     f"[web] start claude slug={slug} ok={bool(result.get('ok'))} "
                     f"session={result.get('session', '')} target={result.get('target', '')}",
@@ -1154,6 +1220,31 @@ def make_handler(
                     project_root=root,
                     task_slug=slug,
                     data=result,
+                )
+                st, b, h = (
+                    _json_bytes(result)
+                    if result.get("ok")
+                    else _json_bytes(result, 400)
+                )
+                self._send(st, b, h)
+                return
+
+            m_paste = re.match(r"^/api/tasks/([^/]+)/(?:claude|interview)/paste-prompt$", path)
+            if m_paste:
+                root, project_id = self._resolve_scope(parsed)
+                if root is None or project_id is None:
+                    self._bad_project()
+                    return
+                slug = m_paste.group(1)
+                if not _SLUG_RE.match(slug):
+                    st, b, h = _json_bytes({"error": "invalid slug"}, 400)
+                    self._send(st, b, h)
+                    return
+                result = claude_registry.paste_prompt(
+                    root,
+                    project_id,
+                    slug,
+                    default_skills=default_skills,
                 )
                 st, b, h = (
                     _json_bytes(result)
@@ -1630,7 +1721,7 @@ def serve(
         auth_token,
         multi_project_workspace=multi_project_workspace,
     )
-    server = HTTPServer((host, port), handler)
+    server = ThreadingHTTPServer((host, port), handler)
     rud_root = project_root / ".RUD"
     print("", flush=True)
     print("claudeloop web", flush=True)

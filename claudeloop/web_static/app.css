@@ -59,7 +59,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.88em; background: var(
 }
 .topbar__left { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-.brand__name { font-weight: 800; font-size: 1.14rem; letter-spacing: 0.02em; white-space: nowrap; }
+.brand__name { font-weight: 800; font-size: 1.14rem; letter-spacing: 0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brand__tag { color: var(--text-faint); font-size: 0.85rem; white-space: nowrap; }
 .topbar__meta { display: flex; gap: 10px; align-items: center; font-size: 0.85rem; color: var(--text-dim); min-width: 0; }
 .topbar__meta-item { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -963,6 +963,30 @@ label { display: block; margin-top: 10px; font-size: 0.85rem; color: var(--text-
 .tab-action-row .btn,
 .tab-action-row .tab-panel__hint { flex: 0 0 auto; margin: 0; }
 .action-hint { color: var(--text-dim); font-size: 0.85rem; white-space: pre-line; }
+.rud-flow-row {
+  margin: -2px 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.88), rgba(248,247,243,0.78));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rud-flow-row__label {
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-right: 2px;
+}
+.rud-flow-row__hint {
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  flex: 1 1 220px;
+}
 .inline-field {
   display: inline-flex;
   align-items: center;
