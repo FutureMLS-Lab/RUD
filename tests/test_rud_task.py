@@ -19,12 +19,15 @@ from claudeloop.rud_task import (
     read_meta,
     read_project_notes,
     read_task_markdown_file,
+    read_task_monitor,
     read_template,
     session_id_from_path,
     slugify,
     task_root,
     task_worktree_path,
+    worktree_diff,
     write_project_notes,
+    write_task_monitor,
     write_template,
 )
 
@@ -88,19 +91,18 @@ def test_list_task_markdown_files_returns_plan_first(tmp_path: Path) -> None:
     root = task_root(tmp_path, meta.slug)
     (root / "review.md").write_text("# review", encoding="utf-8")
     (root / "Notes.md").write_text("# notes", encoding="utf-8")
-    # Non-markdown and nested files must be excluded.
+    # Non-markdown files are excluded; nested markdown is surfaced by
+    # relative path so worktree docs can be previewed from the UI.
     (root / "stuff.txt").write_text("ignore me", encoding="utf-8")
     nested = root / "work" / "subrepo"
     nested.mkdir(parents=True)
     (nested / "DEEP.md").write_text("# deep", encoding="utf-8")
 
     names = list_task_markdown_files(tmp_path, meta.slug)
-    # PLAN.md must be first, the rest sorted case-insensitively, and the
-    # nested DEEP.md / non-markdown stuff.txt must not appear.
+    # PLAN.md must be first; the rest are sorted case-insensitively.
     assert names[0] == "PLAN.md"
-    assert names[1:] == ["Notes.md", "review.md"]
+    assert names[1:] == ["Notes.md", "review.md", "work/subrepo/DEEP.md"]
     assert "stuff.txt" not in names
-    assert "DEEP.md" not in names
 
 
 def test_list_task_markdown_files_without_plan(tmp_path: Path) -> None:
@@ -267,6 +269,33 @@ def test_create_task_auto_creates_worktree(tmp_path: Path) -> None:
     assert reloaded is not None
     assert reloaded.branch == f"zhongzhu/{meta.slug}"
     assert reloaded.worktree_path == str(wt)
+
+
+def test_delete_task_removes_worktree_registration(tmp_path: Path) -> None:
+    """Deleting a task must also unregister its git worktree(s), not just rmtree
+    the dir - otherwise the source repo keeps a stale `git worktree list` entry."""
+    repo = tmp_path / "myrepo"
+    _git_init_repo(repo)
+    meta = create_task(repo, "wt del", "goal", skills_path=None)
+    wt = task_worktree_path(repo, meta.slug)
+    assert wt is not None and wt.is_dir()
+
+    def worktree_list() -> str:
+        r = subprocess.run(
+            ["git", "worktree", "list"], cwd=repo, capture_output=True, text=True,
+        )
+        return r.stdout
+
+    assert str(wt) in worktree_list()
+    reg = repo / ".git" / "worktrees"
+    assert reg.is_dir() and any(reg.iterdir())
+
+    ok, msg = delete_task(repo, meta.slug)
+    assert ok, msg
+    assert not task_root(repo, meta.slug).exists()
+    # No dangling registration left behind.
+    assert str(wt) not in worktree_list()
+    assert not (reg.is_dir() and any(reg.iterdir()))
 
 
 def test_create_task_skips_worktree_in_non_git_root(tmp_path: Path) -> None:
@@ -649,3 +678,78 @@ def test_detect_worktree_clears_stale_path(tmp_path: Path) -> None:
     assert refreshed is not None
     # On-disk worktree still exists, so detection picks it back up.
     assert Path(refreshed.worktree_path).is_dir()
+
+
+def test_task_monitor_roundtrip(tmp_path: Path) -> None:
+    meta = create_task(tmp_path, "mon", "g", skills_path=None, auto_worktree=False)
+    # Default for a brand-new task: disabled, empty pattern.
+    cfg = read_task_monitor(tmp_path, meta.slug)
+    assert cfg == {"enabled": False, "pattern": "", "last_fired": "", "last_match": ""}
+
+    assert write_task_monitor(
+        tmp_path, meta.slug, enabled=True, pattern=r"done|blocked"
+    )
+    cfg = read_task_monitor(tmp_path, meta.slug)
+    assert cfg["enabled"] is True
+    assert cfg["pattern"] == r"done|blocked"
+
+    # Omitting last_fired/last_match preserves prior values.
+    write_task_monitor(
+        tmp_path, meta.slug, enabled=True, pattern=r"done|blocked",
+        last_fired="2026-01-01T00:00:00+00:00", last_match="done",
+    )
+    write_task_monitor(tmp_path, meta.slug, enabled=False, pattern=r"x")
+    cfg = read_task_monitor(tmp_path, meta.slug)
+    assert cfg["enabled"] is False
+    assert cfg["pattern"] == "x"
+    assert cfg["last_fired"] == "2026-01-01T00:00:00+00:00"
+    assert cfg["last_match"] == "done"
+
+
+def test_worktree_diff_captures_uncommitted_and_untracked(tmp_path: Path) -> None:
+    repo = tmp_path / "drepo"
+    _git_init_repo(repo)
+    meta = create_task(repo, "diff task", "goal", skills_path=None)
+    wt = task_worktree_path(repo, meta.slug)
+    assert wt is not None and wt.is_dir()
+
+    # Modify a tracked file + add an untracked one inside the worktree.
+    (wt / "README.md").write_text("# hi\nmore\n", encoding="utf-8")
+    (wt / "new_file.txt").write_text("brand new\n", encoding="utf-8")
+
+    d = worktree_diff(wt)
+    assert d["path"] == str(wt)
+    files = {f["path"]: f for f in d["files"]}
+    assert "README.md" in files
+    assert files["README.md"]["scope"] == "uncommitted"
+    assert files["README.md"]["status"] == "modified"
+    assert files["README.md"]["additions"] >= 1
+    assert "new_file.txt" in files
+    assert files["new_file.txt"]["status"] == "added"
+
+
+def test_parse_patch_files_splits_per_file() -> None:
+    from claudeloop.rud_task import _parse_patch_files
+
+    patch = (
+        "diff --git a/foo.py b/foo.py\n"
+        "index 111..222 100644\n"
+        "--- a/foo.py\n"
+        "+++ b/foo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-old line\n"
+        "+new line\n"
+        " context\n"
+        "diff --git a/bar.txt b/bar.txt\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/bar.txt\n"
+        "@@ -0,0 +1 @@\n"
+        "+hello\n"
+    )
+    files = _parse_patch_files(patch, "uncommitted")
+    assert [f["path"] for f in files] == ["foo.py", "bar.txt"]
+    assert files[0]["status"] == "modified"
+    assert files[0]["additions"] == 1 and files[0]["deletions"] == 1
+    assert files[1]["status"] == "added"
+    assert files[1]["additions"] == 1

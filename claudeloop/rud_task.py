@@ -309,6 +309,9 @@ class TaskMeta:
     # Which CLI drives this task's tmux pane.  Defaults to claude so
     # legacy task.json files (no `agent` key) keep working unchanged.
     agent: str = AGENT_CLAUDE
+    # Task kind: "agent" (Claude/Codex deep-interview task, default) or
+    # "kernel" (Kernel Lab task — the task view renders the Kernel Lab UI).
+    kind: str = "agent"
     # ``worktree_path`` and ``branch`` are the *primary* worktree (also
     # mirrored at ``worktrees[0]`` / ``branches[0]``); the Claude pane
     # always opens there.  Use the lists when iterating over all the
@@ -333,6 +336,7 @@ class TaskMeta:
             "interview_model": self.interview_model,
             "tmux_interview_target": self.tmux_interview_target,
             "agent": self.agent,
+            "kind": self.kind,
             "worktree_path": self.worktree_path,
             "branch": self.branch,
             "worktrees": list(self.worktrees),
@@ -389,6 +393,7 @@ class TaskMeta:
             interview_model=str(data.get("interview_model", "claude-opus-4-8")),
             tmux_interview_target=str(data.get("tmux_interview_target", "")),
             agent=normalize_agent(data.get("agent")),
+            kind=str(data.get("kind", "agent") or "agent"),
             worktree_path=primary_wt,
             branch=primary_br,
             worktrees=wts,
@@ -468,6 +473,7 @@ def create_task(
     skills_path: Path | None = None,
     interview_model: str = "claude-opus-4-8",
     agent: str = AGENT_CLAUDE,
+    kind: str = "agent",
     *,
     auto_worktree: bool = True,
 ) -> TaskMeta:
@@ -490,6 +496,7 @@ def create_task(
         skills_path=str(sk),
         interview_model=interview_model,
         agent=normalize_agent(agent),
+        kind=kind,
     )
     write_meta(project_root, meta)
     _insert_task_order_front(project_root, meta.slug)
@@ -656,17 +663,21 @@ def delete_task(project_root: Path, slug: str) -> tuple[bool, str]:
         return False, "invalid task path"
     if not td.is_dir() or not (td / META).is_file():
         return False, "task not found"
-    # Best-effort remove the git worktree registration before deleting on disk
-    # so the user's main checkout doesn't keep a dangling `worktree list`
-    # entry pointing at a missing path.
-    wt = task_worktree_path(project_root, slug)
-    if wt is not None:
-        _git_worktree_remove(project_root.resolve(), wt)
+    # Best-effort: unregister EVERY git worktree under <task>/work/ from its
+    # source repo before deleting on disk, so the user's checkout doesn't keep
+    # dangling `git worktree list` entries.  Runs git from inside each worktree
+    # so it resolves the right parent repo - handles project-root repos AND
+    # child-repo / container-project worktrees, and multiple worktrees per task.
+    worktree_repos = _unregister_task_worktrees(project_root, slug)
     try:
         shutil.rmtree(td)
     except OSError as exc:
         if not _sudo_rmtree(td, root):
             return False, str(exc)
+    # Safety net: prune any registration that survived (e.g. `worktree remove`
+    # failed but the directory got deleted anyway).
+    for common_dir in worktree_repos:
+        _git(["--git-dir", common_dir, "worktree", "prune"], project_root.resolve())
     _remove_task_from_order(project_root, slug)
     return True, ""
 
@@ -709,6 +720,139 @@ def write_template(project_root: Path, slug: str, name: str, content: str) -> bo
     return True
 
 
+# --- Kernel Lab interview state (per task, on disk) -------------------------
+
+KERNEL_INTERVIEW = "kernel_interview.json"
+
+# The Kernel Lab interview is a stateless `claude -p` chat - the server keeps
+# no live session.  To make the conversation survive page reloads / server
+# restarts we persist the message list + the last proposed spec next to the
+# task (one JSON file per task).
+
+
+def read_kernel_interview(project_root: Path, slug: str) -> dict[str, Any]:
+    """Return ``{"messages": [...], "spec": <obj|None>}`` for a task.
+
+    Always returns a well-formed dict; missing/corrupt files yield an empty
+    conversation so the UI can start fresh.
+    """
+    p = task_root(project_root, slug) / KERNEL_INTERVIEW
+    if not p.is_file():
+        return {"messages": [], "spec": None}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"messages": [], "spec": None}
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+    spec = data.get("spec")
+    if not isinstance(spec, dict):
+        spec = None
+    return {"messages": messages, "spec": spec}
+
+
+def write_kernel_interview(
+    project_root: Path,
+    slug: str,
+    messages: list[Any],
+    spec: Any = None,
+) -> bool:
+    td = task_root(project_root, slug)
+    if not td.is_dir():
+        return False
+    payload = json.dumps(
+        {
+            "messages": messages if isinstance(messages, list) else [],
+            "spec": spec if isinstance(spec, dict) else None,
+            "updated_at": _now_iso(),
+        },
+        indent=2,
+    )
+    path = td / KERNEL_INTERVIEW
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(path)
+    except PermissionError:
+        return _sudo_write_text(path, payload)
+    except OSError:
+        return False
+    return True
+
+
+# --- Per-task run monitor ---------------------------------------------------
+
+TASK_MONITOR = "monitor.json"
+
+# A sensible default: fire when the agent reports it is done, blocked, or
+# waiting for input.  Case-insensitive.  Users can override with any regex.
+DEFAULT_MONITOR_PATTERN = (
+    r"(?i)\b(all done|task complete|completed|finished|blocked|"
+    r"waiting for (?:your )?input|need(?:s)? (?:your )?input|awaiting)\b"
+)
+
+
+def read_task_monitor(project_root: Path, slug: str) -> dict[str, Any]:
+    """Return the persisted monitor config for a task.
+
+    Shape: ``{enabled, pattern, last_fired, last_match}``.  Missing/corrupt
+    files yield a disabled monitor with an empty pattern.
+    """
+    base = {"enabled": False, "pattern": "", "last_fired": "", "last_match": ""}
+    p = task_root(project_root, slug) / TASK_MONITOR
+    if not p.is_file():
+        return base
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return base
+    if not isinstance(data, dict):
+        return base
+    return {
+        "enabled": bool(data.get("enabled", False)),
+        "pattern": str(data.get("pattern", "")),
+        "last_fired": str(data.get("last_fired", "")),
+        "last_match": str(data.get("last_match", "")),
+    }
+
+
+def write_task_monitor(
+    project_root: Path,
+    slug: str,
+    *,
+    enabled: bool,
+    pattern: str,
+    last_fired: str | None = None,
+    last_match: str | None = None,
+) -> bool:
+    """Persist the monitor config; preserves last_fired/last_match if omitted."""
+    td = task_root(project_root, slug)
+    if not td.is_dir():
+        return False
+    cur = read_task_monitor(project_root, slug)
+    payload = json.dumps(
+        {
+            "enabled": bool(enabled),
+            "pattern": str(pattern or ""),
+            "last_fired": cur["last_fired"] if last_fired is None else str(last_fired),
+            "last_match": cur["last_match"] if last_match is None else str(last_match),
+            "updated_at": _now_iso(),
+        },
+        indent=2,
+    )
+    path = td / TASK_MONITOR
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(path)
+    except PermissionError:
+        return _sudo_write_text(path, payload)
+    except OSError:
+        return False
+    return True
+
+
 # --- Top-level task markdown files (for the read-only embed picker) ---------
 
 # Maximum size we will ship inline in the task GET payload. Larger files are
@@ -717,34 +861,69 @@ def write_template(project_root: Path, slug: str, name: str, content: str) -> bo
 _MAX_TASK_MD_INLINE_BYTES = 10 * 1024 * 1024
 
 
-def _is_safe_md_basename(name: str) -> bool:
+_SKIP_MARKDOWN_SCAN_DIRS = frozenset(
+    {
+        ".cache",
+        ".git",
+        ".hg",
+        ".mypy_cache",
+        ".next",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".svn",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "target",
+        "venv",
+    }
+)
+
+
+def _is_safe_md_relpath(name: str) -> bool:
     """Reject anything that could escape the task directory or isn't *.md."""
     if not name or name in (".", ".."):
         return False
-    if "/" in name or "\\" in name or "\x00" in name:
+    if "\\" in name or "\x00" in name:
         return False
     if not name.lower().endswith(".md"):
+        return False
+    parts = Path(name).parts
+    if any(part in ("", ".", "..") for part in parts):
         return False
     return True
 
 
 def list_task_markdown_files(project_root: Path, slug: str) -> list[str]:
-    """Return basenames of ``*.md`` files at the top level of the task root.
+    """Return relative paths of ``*.md`` files under the task root.
 
     PLAN.md is always listed first when it exists; other files follow
-    case-insensitively sorted. The list excludes anything under
-    subdirectories (e.g. the worktree at ``<task_root>/work/``) and any
-    non-markdown files (e.g. ``task.json``).
+    case-insensitively sorted. Common generated/dependency directories are
+    skipped so worktrees with large build outputs do not make the UI slow.
     """
     root = task_root(project_root, slug)
     if not root.is_dir():
         return []
+    candidates: list[str] = []
     try:
-        candidates = [
-            p.name
-            for p in root.iterdir()
-            if p.is_file() and _is_safe_md_basename(p.name)
-        ]
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [
+                d for d in dirnames if d not in _SKIP_MARKDOWN_SCAN_DIRS
+            ]
+            base = Path(dirpath)
+            for filename in filenames:
+                if not filename.lower().endswith(".md"):
+                    continue
+                path = base / filename
+                try:
+                    rel = path.relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                if _is_safe_md_relpath(rel):
+                    candidates.append(rel)
     except OSError:
         return []
     candidates.sort(key=str.lower)
@@ -761,18 +940,18 @@ def read_task_markdown_file(
     *,
     max_bytes: int = _MAX_TASK_MD_INLINE_BYTES,
 ) -> str | None:
-    """Read a top-level ``*.md`` file in the task root.
+    """Read a ``*.md`` file under the task root.
 
     Returns ``None`` when *name* is unsafe, the file does not exist, or
     its size exceeds *max_bytes* (callers can pass a larger limit to
     force inclusion, e.g. when serving a single file on demand).
     """
-    if not _is_safe_md_basename(name):
+    if not _is_safe_md_relpath(name):
         return None
     root = task_root(project_root, slug)
     if not root.is_dir():
         return None
-    path = root / name
+    path = root / Path(name)
     try:
         # Double-check the resolved path is still inside the task root
         # (defends against symlink trickery).
@@ -1008,6 +1187,37 @@ def _git(args: list[str], cwd: Path, timeout: int = 60) -> tuple[bool, str, str]
             except (OSError, subprocess.TimeoutExpired) as exc:
                 return False, "", str(exc)
     return r.returncode == 0, (r.stdout or "").strip(), (r.stderr or "").strip()
+
+
+def _git_diff(args: list[str], cwd: Path, timeout: int = 60) -> tuple[bool, str]:
+    """Run a git diff-style command, returning raw (unstripped) stdout.
+
+    ``git diff --no-index`` exits 1 when files differ, which is the normal
+    "there is a diff" case, so we treat exit codes 0 and 1 as success. Unlike
+    :func:`_git` we must not strip stdout - leading/trailing whitespace is
+    significant in a unified patch.
+    """
+    def run() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    try:
+        r = run()
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+    if r.returncode not in (0, 1):
+        safe = _dubious_ownership_safe_dir(cwd, r.stdout, r.stderr)
+        if safe is not None and _mark_git_safe_directory(safe):
+            try:
+                r = run()
+            except (OSError, subprocess.TimeoutExpired):
+                return False, ""
+    return r.returncode in (0, 1), (r.stdout or "")
 
 
 def _dubious_ownership_safe_dir(cwd: Path, stdout: str, stderr: str) -> Path | None:
@@ -1259,6 +1469,189 @@ def worktree_status(wt: Path) -> dict[str, Any] | None:
     }
 
 
+def _strip_ab_prefix(path: str) -> str:
+    if path.startswith(("a/", "b/")):
+        return path[2:]
+    return path
+
+
+def _parse_patch_files(
+    patch_text: str,
+    scope: str,
+    max_patch_bytes: int = 200_000,
+) -> list[dict[str, Any]]:
+    """Split a unified ``git diff`` blob into one entry per file.
+
+    Each entry has ``path``, ``old_path`` (for renames), ``status``
+    (added/deleted/modified/renamed), ``scope``, ``additions``,
+    ``deletions``, ``binary`` and the per-file ``patch`` text.
+    """
+    if not patch_text.strip():
+        return []
+    files: list[dict[str, Any]] = []
+    chunks = re.split(r"(?m)^(?=diff --git )", patch_text)
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        lines = chunk.splitlines()
+        header = lines[0] if lines else ""
+        path = ""
+        old_path = ""
+        status = "modified"
+        additions = 0
+        deletions = 0
+        is_binary = False
+        for ln in lines:
+            if ln.startswith("new file"):
+                status = "added"
+            elif ln.startswith("deleted file"):
+                status = "deleted"
+            elif ln.startswith("rename from "):
+                old_path = ln[len("rename from "):].strip()
+                status = "renamed"
+            elif ln.startswith("rename to "):
+                path = ln[len("rename to "):].strip()
+                status = "renamed"
+            elif ln.startswith("Binary files"):
+                is_binary = True
+            elif ln.startswith("+++ "):
+                p = ln[4:].strip()
+                if p != "/dev/null":
+                    path = _strip_ab_prefix(p)
+            elif ln.startswith("--- "):
+                p = ln[4:].strip()
+                if p != "/dev/null":
+                    old_path = _strip_ab_prefix(p)
+            elif ln.startswith("+") and not ln.startswith("+++"):
+                additions += 1
+            elif ln.startswith("-") and not ln.startswith("---"):
+                deletions += 1
+        if not path:
+            path = old_path
+        if not path:
+            m = re.match(r"diff --git a/(.*?) b/(.*)$", header)
+            if m:
+                path = m.group(2)
+        patch = chunk
+        if len(patch) > max_patch_bytes:
+            patch = patch[:max_patch_bytes] + "\n... (diff truncated) ...\n"
+        files.append({
+            "path": path or "(unknown)",
+            "old_path": old_path if (status == "renamed" and old_path and old_path != path) else "",
+            "status": status,
+            "scope": scope,
+            "additions": additions,
+            "deletions": deletions,
+            "binary": is_binary,
+            "patch": patch,
+        })
+    return files
+
+
+def _detect_base_ref(wt: Path) -> str:
+    """Best-effort default base branch to compare committed work against."""
+    for ref in ("origin/main", "origin/master", "main", "master"):
+        ok, _, _ = _git(["rev-parse", "--verify", "--quiet", ref], wt, timeout=10)
+        if ok:
+            return ref
+    return ""
+
+
+def worktree_diff(wt: Path, max_files: int = 400) -> dict[str, Any]:
+    """Read-only diff snapshot for a single worktree.
+
+    Combines two scopes into one per-file list:
+
+    - ``uncommitted``: working tree + index vs ``HEAD`` (tracked changes via
+      ``git diff HEAD``) plus untracked files (rendered as additions).
+    - ``committed``: commits on this branch vs the detected base
+      (``base...HEAD``), so reviewers see what the task added on top of main.
+    """
+    try:
+        wt = wt.resolve()
+    except OSError as exc:
+        return {"path": str(wt), "branch": "", "base": "", "files": [], "error": str(exc)}
+    if not wt.is_dir():
+        return {"path": str(wt), "branch": "", "base": "", "files": [], "error": "worktree directory missing"}
+
+    _ok, branch, _ = _git(["branch", "--show-current"], wt, timeout=10)
+    branch = branch.strip()
+    base = _detect_base_ref(wt)
+
+    files: list[dict[str, Any]] = []
+    truncated = False
+
+    # Committed changes vs base (skip if no base or base == HEAD tip).
+    if base:
+        ok_c, committed = _git_diff(
+            ["diff", "--find-renames", f"{base}...HEAD"], wt, timeout=60
+        )
+        if ok_c:
+            files.extend(_parse_patch_files(committed, "committed"))
+
+    # Tracked uncommitted changes vs HEAD (staged + unstaged).
+    ok_u, uncommitted = _git_diff(["diff", "--find-renames", "HEAD"], wt, timeout=60)
+    if ok_u:
+        files.extend(_parse_patch_files(uncommitted, "uncommitted"))
+
+    # Untracked files: list each, render as an addition via --no-index.
+    ok_s, status_out, _ = _git(
+        ["status", "--porcelain", "--untracked-files=all"], wt, timeout=15
+    )
+    if ok_s:
+        untracked_paths = [
+            ln[3:].strip().strip('"')
+            for ln in status_out.splitlines()
+            if ln.startswith("?? ")
+        ]
+        for rel in untracked_paths[:80]:
+            ok_d, patch = _git_diff(
+                ["diff", "--no-index", "--", "/dev/null", rel], wt, timeout=30
+            )
+            if ok_d and patch.strip():
+                files.extend(_parse_patch_files(patch, "uncommitted"))
+            else:
+                files.append({
+                    "path": rel,
+                    "old_path": "",
+                    "status": "added",
+                    "scope": "uncommitted",
+                    "additions": 0,
+                    "deletions": 0,
+                    "binary": True,
+                    "patch": "",
+                })
+        if len(untracked_paths) > 80:
+            truncated = True
+
+    if len(files) > max_files:
+        files = files[:max_files]
+        truncated = True
+
+    return {
+        "path": str(wt),
+        "branch": branch,
+        "base": base,
+        "files": files,
+        "truncated": truncated,
+    }
+
+
+def task_worktree_diffs(project_root: Path, slug: str) -> list[dict[str, Any]]:
+    """``worktree_diff`` for every worktree tracked by the task."""
+    meta = read_meta(project_root, slug)
+    if meta is None:
+        return []
+    paths = list(meta.worktrees)
+    if not paths:
+        return []
+    if len(paths) == 1:
+        return [worktree_diff(Path(paths[0]))]
+    max_workers = min(len(paths), 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        return list(pool.map(lambda p: worktree_diff(Path(p)), paths))
+
+
 def list_task_worktree_statuses(project_root: Path, slug: str) -> list[dict[str, Any]]:
     """Status snapshot for every worktree currently tracked by the task.
 
@@ -1333,18 +1726,33 @@ def push_worktree_branch(wt: Path) -> dict[str, Any]:
     }
 
 
-def _git_worktree_remove(project_root: Path, worktree: Path) -> None:
-    """Best-effort ``git worktree remove`` so deletes don't leave stale entries."""
-    git_root = git_toplevel(project_root)
-    if git_root is None:
-        return
-    try:
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(worktree)],
-            cwd=str(git_root),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+def _unregister_task_worktrees(project_root: Path, slug: str) -> set[str]:
+    """``git worktree remove --force`` every worktree under the task.
+
+    Returns the set of parent-repo git-common-dirs so the caller can run a
+    final ``git worktree prune`` after the task directory is deleted.  Runs git
+    from inside each worktree so it resolves the correct parent repo even when
+    the worktree was created from a child repo (container projects) rather than
+    the project root, and so multi-worktree tasks are fully cleaned up.
+    """
+    commons: set[str] = set()
+    for wt in list_task_worktrees(project_root, slug):
+        try:
+            if not wt.is_dir():
+                continue
+        except OSError:
+            continue
+        ok, common, _ = _git(["rev-parse", "--git-common-dir"], wt)
+        if ok and common:
+            cp = Path(common)
+            if not cp.is_absolute():
+                cp = wt / cp
+            try:
+                commons.add(str(cp.resolve()))
+            except OSError:
+                commons.add(str(cp))
+        # remove (then --force fallback) from inside the worktree itself
+        ok_rm, _out, _err = _git(["worktree", "remove", str(wt)], wt)
+        if not ok_rm:
+            _git(["worktree", "remove", "--force", str(wt)], wt)
+    return commons

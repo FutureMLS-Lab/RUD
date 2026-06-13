@@ -21,14 +21,18 @@ from __future__ import annotations
 import base64
 import binascii
 import hmac
+import importlib.util
 import json
 import mimetypes
 import os
 import re
 import shlex
 import subprocess
+import sys
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,6 +44,7 @@ from claudeloop.paths import bundled_skills_path, web_static_dir
 from claudeloop.rud_task import (
     AGENT_CLAUDE,
     AGENT_CODEX,
+    DEFAULT_MONITOR_PATTERN,
     PLAN,
     SUPPORTED_AGENTS,
     add_claude_session,
@@ -58,19 +63,24 @@ from claudeloop.rud_task import (
     normalize_agent,
     prepare_task_worktree_from,
     push_worktree_branch,
+    read_kernel_interview,
     read_meta,
     read_project_notes,
     read_task_markdown_file,
+    read_task_monitor,
     read_template,
     remove_task_worktree,
     reorder_tasks,
     rename_task_meta,
     session_id_from_path,
     task_root,
+    task_worktree_diffs,
     task_worktree_path,
     update_meta,
     worktree_status,
+    write_kernel_interview,
     write_project_notes,
+    write_task_monitor,
     write_template,
 )
 from claudeloop.tmux_util import (
@@ -194,6 +204,94 @@ def _launch_root_child_dirs(launch_root: Path, *, limit: int = 200) -> list[dict
     return out
 
 
+_SKIP_MARKDOWN_SCAN_DIRS = frozenset(
+    {
+        ".cache",
+        ".git",
+        ".hg",
+        ".mypy_cache",
+        ".next",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".svn",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "target",
+        "venv",
+    }
+)
+
+
+def _available_skill_options(
+    default_skills: Path,
+    project_root: Path | None = None,
+    *,
+    limit: int = 500,
+) -> list[dict[str, str]]:
+    """Return selectable skill markdown files for the web UI."""
+    seen: set[Path] = set()
+    options: list[dict[str, str]] = []
+    skills_root = bundled_skills_path().parent
+    project_base: Path | None = None
+    if project_root is not None:
+        try:
+            project_base = project_root.resolve()
+        except OSError:
+            project_base = None
+
+    def add(path: Path) -> None:
+        try:
+            p = path.expanduser().resolve()
+        except OSError:
+            return
+        if (
+            len(options) >= limit
+            or not p.is_file()
+            or p.suffix.lower() != ".md"
+            or p in seen
+        ):
+            return
+        seen.add(p)
+        label = p.name
+        if project_base is not None:
+            try:
+                label = str(p.relative_to(project_base))
+            except ValueError:
+                pass
+        if label == p.name:
+            try:
+                label = str(p.relative_to(skills_root))
+            except ValueError:
+                pass
+        options.append({"label": label, "path": str(p)})
+
+    add(default_skills)
+    if skills_root.is_dir():
+        for p in sorted(skills_root.rglob("*.md"), key=lambda x: str(x).lower()):
+            add(p)
+    if project_base is not None and project_base.is_dir():
+        try:
+            for dirpath, dirnames, filenames in os.walk(project_base):
+                if len(options) >= limit:
+                    break
+                dirnames[:] = [
+                    d for d in dirnames if d not in _SKIP_MARKDOWN_SCAN_DIRS
+                ]
+                base = Path(dirpath)
+                for filename in sorted(filenames, key=str.lower):
+                    if len(options) >= limit:
+                        break
+                    if filename.lower().endswith(".md"):
+                        add(base / filename)
+        except OSError:
+            pass
+    return options
+
+
 # --- HTTP response helpers --------------------------------------------------
 
 
@@ -240,6 +338,390 @@ def _safe_static_path(static_root: Path, url_path: str) -> Path | None:
     except ValueError:
         return None
     return candidate if candidate.is_file() else None
+
+
+# --- Kernel Lab (TKCC integration) ------------------------------------------
+# RUD drives kernel-optimization runs by shelling out to the tkcc repo's
+# scaffold/agent_runner/rud_kernel.py helper (JSON in/out). Run records are
+# stored project-scoped under <root>/.RUD/kernel-runs/<id>.json.
+
+_KERNEL_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _kernel_runs_dir(root: Path) -> Path:
+    return root / ".RUD" / "kernel-runs"
+
+
+def _kernel_write_record(root: Path, rec: dict[str, Any]) -> None:
+    d = _kernel_runs_dir(root)
+    d.mkdir(parents=True, exist_ok=True)
+    dest = d / f"{rec['id']}.json"
+    tmp = dest.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=2))
+    tmp.replace(dest)
+
+
+def _kernel_read_record(root: Path, run_uid: str) -> dict[str, Any] | None:
+    f = _kernel_runs_dir(root) / f"{run_uid}.json"
+    if not f.is_file():
+        return None
+    try:
+        return json.loads(f.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _sweep_stale_kernel_runs(roots: list[Path]) -> int:
+    """Mark any ``launching``/``resolving`` run records as ``error`` across the
+    given project roots. Called at server startup: a launch/prepare's worker
+    thread can't survive a restart, so such records are definitionally stale."""
+    swept = 0
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            key = str(root.resolve())
+        except OSError:
+            key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        d = _kernel_runs_dir(root)
+        if not d.is_dir():
+            continue
+        for f in d.glob("*.json"):
+            try:
+                rec = json.loads(f.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            if rec.get("state") in ("launching", "resolving"):
+                rec["state"] = "error"
+                rec["error"] = "launch interrupted by a server restart (stale)"
+                try:
+                    f.write_text(json.dumps(rec, ensure_ascii=False, indent=2))
+                    swept += 1
+                except OSError:
+                    pass
+    return swept
+
+
+def _kernel_list_records(root: Path) -> list[dict[str, Any]]:
+    d = _kernel_runs_dir(root)
+    if not d.is_dir():
+        return []
+    recs: list[dict[str, Any]] = []
+    for f in d.glob("*.json"):
+        try:
+            recs.append(json.loads(f.read_text()))
+        except (json.JSONDecodeError, OSError):
+            continue
+    recs.sort(key=lambda r: r.get("created_at", 0.0), reverse=True)
+    return recs
+
+
+def _tkcc_helper_cmd(
+    root: Path, script_name: str, module: str
+) -> tuple[list[str] | None, str]:
+    """Resolve how to invoke a TKCC helper, returning ``(base_cmd, error)``.
+
+    Order of preference:
+    1. The active project's own tkcc checkout
+       (``<root>/scaffold/agent_runner/<script_name>``) - used when the project
+       IS a tkcc-kernels-hub checkout.
+    2. A pip-installed tkcc on this server's Python
+       (``python -P -m <module>``) - lets Kernel Lab work from ANY project
+       (e.g. tokenspeed / xorl) as long as tkcc was ``pip install -e``'d.
+       ``-P`` keeps the project cwd off ``sys.path`` so it can't shadow the
+       installed ``scaffold`` package.
+    """
+    helper = root / "scaffold" / "agent_runner" / script_name
+    if helper.is_file():
+        return [sys.executable, str(helper)], ""
+    try:
+        spec = importlib.util.find_spec(module)
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None:
+        return [sys.executable, "-P", "-m", module], ""
+    return None, (
+        f"TKCC kernel helper '{script_name}' not found. Either switch the active "
+        f"project to a tkcc-kernels-hub checkout, or install tkcc into this "
+        f"server's Python so it's importable: "
+        f"{sys.executable} -m pip install -e <tkcc-kernels-hub> --no-deps"
+    )
+
+
+# Short TTL cache for `service-status` so frequent polls (and concurrent
+# browser tabs) don't each spawn a subprocess + network health-check.
+_KERNEL_SERVICE_CACHE: dict[str, tuple[float, bool, dict[str, Any]]] = {}
+_KERNEL_SERVICE_TTL = 6.0
+_kernel_service_lock = threading.Lock()
+
+
+def _kernel_service_status_cached(root: Path) -> tuple[bool, dict[str, Any]]:
+    key = str(root)
+    now = time.time()
+    with _kernel_service_lock:
+        hit = _KERNEL_SERVICE_CACHE.get(key)
+        if hit and (now - hit[0]) < _KERNEL_SERVICE_TTL:
+            return hit[1], hit[2]
+    ok, data = _run_kernel_helper(root, ["service-status"], timeout=15)
+    with _kernel_service_lock:
+        _KERNEL_SERVICE_CACHE[key] = (now, ok, data)
+    return ok, data
+
+
+def _run_kernel_helper(
+    root: Path, helper_args: list[str], timeout: int = 600
+) -> tuple[bool, dict[str, Any]]:
+    """Invoke rud_kernel (in-project script or pip module) and parse its JSON."""
+    base, err = _tkcc_helper_cmd(root, "rud_kernel.py", "scaffold.agent_runner.rud_kernel")
+    if base is None:
+        return False, {"ok": False, "error": err}
+    try:
+        proc = subprocess.run(
+            [*base, *helper_args],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, {"ok": False, "error": f"kernel helper timed out after {timeout}s"}
+    out = (proc.stdout or "").strip()
+    last = out.splitlines()[-1] if out else ""
+    try:
+        data = json.loads(last)
+    except json.JSONDecodeError:
+        return False, {
+            "ok": False,
+            "error": "kernel helper returned non-JSON",
+            "stdout": out[-1000:],
+            "stderr": (proc.stderr or "")[-1000:],
+        }
+    return bool(data.get("ok")), data
+
+
+def _shape_to_str(shape: Any) -> str:
+    return shape if isinstance(shape, str) else json.dumps(shape)
+
+
+def _kernel_run_log_path(root: Path, run_uid: str) -> Path:
+    return _kernel_runs_dir(root) / f"{run_uid}.log"
+
+
+def _run_kernel_launch_streaming(
+    root: Path, run_uid: str, helper_args: list[str], timeout: int = 2400
+) -> tuple[bool, dict[str, Any]]:
+    """Run the launch helper, streaming its progress (docker build, agent
+    bring-up, …) to ``<run_uid>.log`` live so the web UI can tail it. The
+    helper prints its final single-line JSON result to stdout (captured);
+    everything else (the build log) goes to stderr → the log file."""
+    base, err = _tkcc_helper_cmd(root, "rud_kernel.py", "scaffold.agent_runner.rud_kernel")
+    if base is None:
+        return False, {"ok": False, "error": err}
+    log_path = _kernel_run_log_path(root, run_uid)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    out = ""
+    try:
+        with open(log_path, "w", encoding="utf-8") as lf:
+            lf.write(f"$ {' '.join(base + helper_args)}\n\n")
+            lf.flush()
+            proc = subprocess.Popen(
+                [*base, *helper_args],
+                cwd=str(root),
+                stdout=subprocess.PIPE,
+                stderr=lf,
+                text=True,
+            )
+            try:
+                out, _ = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, _ = proc.communicate()
+                out = (out or "") + f"\n[helper timed out after {timeout}s]"
+    except OSError as exc:
+        return False, {"ok": False, "error": str(exc)}
+    try:
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write("\n" + (out or ""))
+    except OSError:
+        pass
+    data: dict[str, Any] | None = None
+    for line in reversed((out or "").splitlines()):
+        s = line.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                data = json.loads(s)
+                break
+            except json.JSONDecodeError:
+                continue
+    if data is None:
+        return False, {"ok": False, "error": "launch produced no result (see build log)"}
+    return bool(data.get("ok")), data
+
+
+def _launch_kernel_run(root: Path, run_uid: str, cfg: dict[str, Any]) -> None:
+    """Background worker: run the helper's launch and update the run record."""
+    args = [
+        "launch",
+        "--plugin", str(cfg["plugin"]),
+        "--target", str(cfg["target"]),
+        "--shape", _shape_to_str(cfg["shape"]),
+        "--model", str(cfg["model"]),
+        "--n-agents", str(cfg.get("n_agents", 1)),
+        "--starter-mode", str(cfg.get("starter_mode", "none")),
+    ]
+    if cfg.get("target_speedup") is not None:
+        args += ["--target-speedup", str(cfg["target_speedup"])]
+    if cfg.get("auto_terminate"):
+        args += ["--auto-terminate", "--poll-interval", str(cfg.get("poll_interval", 60))]
+    if cfg.get("build"):
+        args += ["--build"]
+    if cfg.get("build_mode"):
+        args += ["--build-mode"]
+    ok, data = _run_kernel_launch_streaming(root, run_uid, args, timeout=2400)
+    rec = _kernel_read_record(root, run_uid) or {"id": run_uid}
+    if ok:
+        rec.update({
+            "state": "running",
+            "run_id": data.get("run_id"),
+            "task_slug": data.get("task_slug"),
+            "containers": data.get("containers", []),
+            "plugin": cfg.get("plugin"),
+            "verified": cfg.get("plugin") not in _kernel_unverified_set(root),
+            "launched_at": time.time(),
+        })
+    else:
+        rec.update({
+            "state": "error",
+            "error": data.get("error", "launch failed"),
+            "error_detail": {
+                k: data[k] for k in ("stderr", "stdout", "stdout_tail", "service") if k in data
+            },
+        })
+    _kernel_write_record(root, rec)
+
+
+# --- Kernel Lab: verified state + interview-driven prepare ---
+
+def _kernel_unverified_path(root: Path) -> Path:
+    return root / ".RUD" / "kernel-plugins-unverified.json"
+
+
+def _kernel_unverified_set(root: Path) -> set[str]:
+    f = _kernel_unverified_path(root)
+    if not f.is_file():
+        return set()
+    try:
+        return set(json.loads(f.read_text()))
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def _kernel_set_unverified(root: Path, name: str, unverified: bool) -> None:
+    s = _kernel_unverified_set(root)
+    if unverified:
+        s.add(name)
+    else:
+        s.discard(name)
+    f = _kernel_unverified_path(root)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(sorted(s)))
+    tmp.replace(f)
+
+
+def _resolve_plugin_for(root: Path, source: str, timeout: int = 2400) -> tuple[str | None, bool, str]:
+    """Run resolve_plugin (in-project script or pip module); return
+    (plugin_name, created, output_tail)."""
+    base, err = _tkcc_helper_cmd(root, "resolve_plugin.py", "scaffold.agent_runner.resolve_plugin")
+    if base is None:
+        return None, False, err
+    try:
+        proc = subprocess.run(
+            [*base, "--source", source],
+            cwd=str(root), capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None, False, "resolve_plugin timed out"
+    out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    m = re.search(r"RESULT:\s*(CREATE|REUSE)\s+(\S+)", out)
+    if not m:
+        return None, False, out[-1500:]
+    return m.group(2), (m.group(1) == "CREATE"), out[-1500:]
+
+
+def _prepare_kernel_run(root: Path, prep_uid: str, spec: dict[str, Any]) -> None:
+    """Background: resolve the plugin for the interview spec, mark a newly created
+    plugin unverified, and leave a 'prepared' record the UI can launch from."""
+    rec = _kernel_read_record(root, prep_uid) or {"id": prep_uid}
+    source = str(spec.get("source", "")).strip()
+    if not source:
+        rec.update({"state": "error", "error": "interview spec has no source kernel"})
+        _kernel_write_record(root, rec)
+        return
+    rec["state"] = "resolving"
+    _kernel_write_record(root, rec)
+    plugin, created, out = _resolve_plugin_for(root, source)
+    if plugin is None:
+        rec.update({"state": "error", "error": "plugin resolution failed", "error_detail": out})
+        _kernel_write_record(root, rec)
+        return
+    if created:
+        _kernel_set_unverified(root, plugin, True)
+    rec.update({
+        "state": "prepared",
+        "kind": "prepare",
+        "plugin": plugin,
+        "plugin_created": created,
+        "verified": plugin not in _kernel_unverified_set(root),
+        "needs_build": created,
+        "resolve_output": out,
+        "prepared_at": time.time(),
+    })
+    _kernel_write_record(root, rec)
+
+
+_KERNEL_INTERVIEW_SYS = """You are running a short technical interview inside "Kernel Lab" to collect everything needed to (a) define a TKCC eval plugin for a GPU kernel and (b) launch an optimization run for it. Ask ONE focused question at a time and be concise. If the user gives a GitHub raw URL or a source link, use your tools to read it and INFER as much as possible (dims, dtype, operation) — only ask what you cannot infer.
+
+Collect: source (a GitHub raw URL, a kernel name, or a clear description of the operation); target hardware (SM100 -> cutedsl/fp8, or H100 -> cuda with bf16/fp8 — this affects whether benchmarking is possible here); operation shape/dims (operation-specific; for attention: heads, head_dim or latent+rope, page_size, KV length, query length Sq, batch, dtype); run params (target speedup [optional], number of agents, starter mode where "preset" means use the user's file as starting code).
+
+When AND ONLY WHEN you have everything, reply with ONLY a fenced ```json code block (no other prose), shaped like:
+{"done": true, "spec": {"source": "<url-or-name>", "target": "cutedsl", "shape": {"batch_size": 4, "num_heads": 128}, "dtype": "fp8", "model": "claude-sonnet-4-20250514", "n_agents": 3, "starter_mode": "preset", "target_speedup": null}}
+Otherwise reply with your next question as plain text only."""
+
+
+def _kernel_interview_turn(messages: list[dict[str, Any]], model: str = "") -> dict[str, Any]:
+    """One interview turn via the logged-in host `claude` CLI. Returns either the
+    next question ({done:false, assistant}) or a final spec ({done:true, spec})."""
+    convo = "\n".join(
+        f"{str(m.get('role', 'user')).capitalize()}: {m.get('content', '')}" for m in messages
+    )
+    prompt = (
+        f"{_KERNEL_INTERVIEW_SYS}\n\nConversation so far:\n{convo}\n\n"
+        "Produce your next turn (a single question, or the final json spec)."
+    )
+    cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
+    if model:
+        cmd += ["--model", model]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "interview turn timed out"}
+    text = (proc.stdout or "").strip()
+    if not text:
+        return {"ok": False, "error": "empty response from claude", "stderr": (proc.stderr or "")[-500:]}
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL) or re.search(
+        r"(\{\s*\"done\"\s*:\s*true.*\})", text, re.DOTALL
+    )
+    if m:
+        try:
+            obj = json.loads(m.group(1))
+            if obj.get("done"):
+                return {"ok": True, "done": True, "spec": obj.get("spec", obj)}
+        except json.JSONDecodeError:
+            pass
+    return {"ok": True, "done": False, "assistant": text}
 
 
 # --- Claude prompt builder --------------------------------------------------
@@ -366,13 +848,57 @@ class ClaudeRegistry:
         agent = normalize_agent(meta.agent)
         session_name = _safe_claude_session_name(project_id, slug, agent)
         target = f"{session_name}:0.0"
+        existing_files = {p.name for p in list_session_files(cwd, agent)}
         if self._tmux_session_exists(session_name):
             if resume_session_id:
+                pane_command = self._pane_current_command(target)
+                if not self._pane_is_idle_shell(pane_command):
+                    return {
+                        "ok": False,
+                        "error": (
+                            "The tmux pane is still running a command. Stop it before "
+                            "resuming another session."
+                        ),
+                        "target": target,
+                        "session": session_name,
+                        "pane_command": pane_command,
+                    }
+                agent_cmd = build_agent_command(
+                    agent,
+                    model=meta.interview_model or agent_default_model(agent),
+                    resume_session_id=resume_session_id,
+                )
+                try:
+                    proc = subprocess.Popen(
+                        ["tmux", "send-keys", "-t", target, shlex.join(agent_cmd), "Enter"],
+                        cwd=str(cwd),
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        env=tmux_subprocess_env(),
+                        start_new_session=True,
+                    )
+                except OSError as e:
+                    return {"ok": False, "error": str(e)}
+                with self._lock:
+                    self._runs[self._registry_key(project_id, slug)] = proc
+                update_meta(project_root, slug, tmux_interview_target=target)
+                add_claude_session(project_root, slug, resume_session_id)
+                threading.Thread(
+                    target=self._watch_for_session_id,
+                    args=(project_root, slug, cwd, agent, existing_files),
+                    daemon=True,
+                ).start()
                 return {
-                    "ok": False,
-                    "error": "Stop the running tmux pane before resuming another session.",
+                    "ok": True,
                     "target": target,
                     "session": session_name,
+                    "cwd": str(cwd),
+                    "agent": agent,
+                    "resumed_session_id": resume_session_id,
+                    "already_running": False,
+                    "reused_tmux": True,
+                    "prompt_pending": False,
+                    "pane_command": pane_command,
                 }
             update_meta(project_root, slug, tmux_interview_target=target)
             return {
@@ -383,9 +909,6 @@ class ClaudeRegistry:
                 "agent": agent,
                 "already_running": True,
             }
-
-        # Snapshot existing session files so the watcher can spot the new one.
-        existing_files = {p.name for p in list_session_files(cwd, agent)}
 
         try:
             subprocess.run(
@@ -431,8 +954,8 @@ class ClaudeRegistry:
             ).start()
         else:
             threading.Thread(
-                target=self._paste_prompt_and_watch_session,
-                args=(project_root, slug, target, cwd, agent, existing_files, default_skills),
+                target=self._watch_for_session_id,
+                args=(project_root, slug, cwd, agent, existing_files),
                 daemon=True,
             ).start()
         return {
@@ -509,12 +1032,37 @@ class ClaudeRegistry:
             return False
         return r.returncode == 0
 
+    def _pane_current_command(self, target: str) -> str:
+        try:
+            r = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", target, "#{pane_current_command}"],
+                capture_output=True,
+                text=True,
+                env=tmux_subprocess_env(),
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        if r.returncode != 0:
+            return ""
+        return (r.stdout or "").strip()
+
+    @staticmethod
+    def _pane_is_idle_shell(command: str) -> bool:
+        cmd = Path((command or "").strip()).name.lower()
+        return cmd in {"", "bash", "dash", "fish", "sh", "tmux", "zsh"}
+
     def session_status(self, project_id: str, slug: str, agent: str = AGENT_CLAUDE) -> dict[str, Any]:
         session_name = _safe_claude_session_name(project_id, slug, agent)
+        target = f"{session_name}:0.0"
+        tmux_alive = self._tmux_session_exists(session_name)
+        pane_command = self._pane_current_command(target) if tmux_alive else ""
         return {
             "session": session_name,
-            "target": f"{session_name}:0.0",
-            "tmux_alive": self._tmux_session_exists(session_name),
+            "target": target,
+            "tmux_alive": tmux_alive,
+            "pane_command": pane_command,
+            "agent_running": tmux_alive and not self._pane_is_idle_shell(pane_command),
             "agent": normalize_agent(agent),
         }
 
@@ -614,6 +1162,195 @@ class ClaudeRegistry:
         return {"ok": False, "error": err or "paste failed", "target": target}
 
 
+# --- Per-task run monitor ---------------------------------------------------
+
+_MONITOR_POLL_SECONDS = 5.0
+_MONITOR_CAPTURE_LINES = 120
+# Don't re-emit for the same sustained match more often than this.
+_MONITOR_FIRE_COOLDOWN = 30.0
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class _TaskMonitor:
+    """Background poller that watches a task's Claude tmux pane.
+
+    Edge-triggered: it emits an OpenClaw event when the configured
+    regex first appears in the captured pane text (after having been
+    absent), with a short cooldown so a sustained match won't spam.
+    """
+
+    def __init__(
+        self,
+        manager: "TaskMonitorManager",
+        project_root: Path,
+        project_id: str,
+        slug: str,
+        pattern: str,
+    ) -> None:
+        self.manager = manager
+        self.project_root = project_root
+        self.project_id = project_id
+        self.slug = slug
+        self.pattern = pattern
+        try:
+            self._re = re.compile(pattern)
+        except re.error:
+            self._re = re.compile(re.escape(pattern))
+        self._stop = threading.Event()
+        self._was_present = False
+        self._last_fire_ts = 0.0
+        self.last_fired = ""
+        self.last_match = ""
+        self.thread = threading.Thread(
+            target=self._loop, name=f"loom-monitor-{slug}", daemon=True
+        )
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def is_alive(self) -> bool:
+        return self.thread.is_alive() and not self._stop.is_set()
+
+    def _current_target(self) -> str:
+        meta = read_meta(self.project_root, self.slug)
+        if meta is None:
+            return ""
+        return (getattr(meta, "tmux_interview_target", "") or "").strip()
+
+    def _loop(self) -> None:
+        # Skip the first tick so we don't fire on stale pane content that was
+        # already there when the monitor was switched on.
+        if self._stop.wait(_MONITOR_POLL_SECONDS):
+            return
+        while not self._stop.is_set():
+            try:
+                target = self._current_target()
+                if target:
+                    ok, text = capture_pane(target, _MONITOR_CAPTURE_LINES)
+                    if ok and text:
+                        m = self._re.search(text)
+                        present = bool(m)
+                        if present and not self._was_present:
+                            self._fire(m.group(0))
+                        self._was_present = present
+            except Exception as exc:  # noqa: BLE001
+                print(f"[monitor] {self.slug} loop error: {exc}", flush=True)
+            if self._stop.wait(_MONITOR_POLL_SECONDS):
+                break
+
+    def _fire(self, matched_text: str) -> None:
+        now = time.time()
+        if now - self._last_fire_ts < _MONITOR_FIRE_COOLDOWN:
+            return
+        self._last_fire_ts = now
+        self.last_match = (matched_text or "").strip()[:200]
+        self.last_fired = _iso_now()
+        print(
+            f"[monitor] {self.slug} matched {self.last_match!r} -> openclaw",
+            flush=True,
+        )
+        try:
+            self.manager.openclaw.emit(
+                "monitor-match",
+                instruction=(
+                    f"Loom monitor fired for task {self.slug}: "
+                    f"matched {self.last_match!r}"
+                ),
+                project_root=self.project_root,
+                task_slug=self.slug,
+                data={"pattern": self.pattern, "match": self.last_match},
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[monitor] {self.slug} emit error: {exc}", flush=True)
+        try:
+            write_task_monitor(
+                self.project_root,
+                self.slug,
+                enabled=True,
+                pattern=self.pattern,
+                last_fired=self.last_fired,
+                last_match=self.last_match,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class TaskMonitorManager:
+    """Owns per-task monitor threads keyed by ``(project_id, slug)``."""
+
+    def __init__(self, openclaw_client: OpenClawClient) -> None:
+        self.openclaw = openclaw_client
+        self._monitors: dict[tuple[str, str], _TaskMonitor] = {}
+        self._lock = threading.Lock()
+
+    def enable(
+        self,
+        project_root: Path,
+        project_id: str,
+        slug: str,
+        pattern: str,
+    ) -> dict[str, Any]:
+        pattern = (pattern or "").strip() or DEFAULT_MONITOR_PATTERN
+        key = (project_id, slug)
+        with self._lock:
+            existing = self._monitors.pop(key, None)
+            if existing is not None:
+                existing.stop()
+            mon = _TaskMonitor(self, project_root, project_id, slug, pattern)
+            self._monitors[key] = mon
+        mon.start()
+        cur = read_task_monitor(project_root, slug)
+        write_task_monitor(project_root, slug, enabled=True, pattern=pattern)
+        return {
+            "enabled": True,
+            "running": True,
+            "pattern": pattern,
+            "default_pattern": DEFAULT_MONITOR_PATTERN,
+            "last_fired": mon.last_fired or cur.get("last_fired", ""),
+            "last_match": mon.last_match or cur.get("last_match", ""),
+        }
+
+    def disable(self, project_root: Path, project_id: str, slug: str) -> dict[str, Any]:
+        key = (project_id, slug)
+        with self._lock:
+            mon = self._monitors.pop(key, None)
+        if mon is not None:
+            mon.stop()
+        cur = read_task_monitor(project_root, slug)
+        write_task_monitor(
+            project_root,
+            slug,
+            enabled=False,
+            pattern=cur.get("pattern", ""),
+        )
+        return self.status(project_root, project_id, slug)
+
+    def status(self, project_root: Path, project_id: str, slug: str) -> dict[str, Any]:
+        key = (project_id, slug)
+        with self._lock:
+            mon = self._monitors.get(key)
+        cfg = read_task_monitor(project_root, slug)
+        # Lazily resume a persisted-on monitor that isn't running yet (e.g.
+        # after a server restart) so the toggle survives restarts.
+        if (mon is None or not mon.is_alive()) and cfg.get("enabled") and cfg.get("pattern"):
+            return self.enable(project_root, project_id, slug, cfg["pattern"])
+        running = bool(mon and mon.is_alive())
+        return {
+            "enabled": running,
+            "running": running,
+            "pattern": (mon.pattern if mon else cfg.get("pattern", "")) or DEFAULT_MONITOR_PATTERN,
+            "default_pattern": DEFAULT_MONITOR_PATTERN,
+            "last_fired": (mon.last_fired if (mon and mon.last_fired) else cfg.get("last_fired", "")),
+            "last_match": (mon.last_match if (mon and mon.last_match) else cfg.get("last_match", "")),
+        }
+
+
 # --- HTTP handler factory ---------------------------------------------------
 
 
@@ -632,6 +1369,7 @@ def make_handler(
     pr = project_registry
     launch_root_resolved = launch_root.resolve()
     multi_ws = multi_project_workspace
+    monitor_manager = TaskMonitorManager(openclaw_client)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -740,6 +1478,8 @@ def make_handler(
                 "tracked": [sid for sid in meta.claude_session_ids],
                 "sessions": ordered,
                 "tmux_alive": live["tmux_alive"],
+                "pane_command": live["pane_command"],
+                "agent_running": live["agent_running"],
                 "tmux_session": live["session"],
                 "tmux_target": meta.tmux_interview_target or "",
                 "claude_cwd": str(cwd),
@@ -793,6 +1533,7 @@ def make_handler(
                         "projectId": pid,
                         "skillsPath": str(sk),
                         "skillsBundledRelative": "claudeloop/skills/AK_skills.md",
+                        "skillsOptions": _available_skill_options(sk, root),
                     }
                 )
                 self._send(st, b, h)
@@ -874,6 +1615,101 @@ def make_handler(
                 self._send(st, b, h)
                 return
 
+            m_ki = re.match(r"^/api/tasks/([^/]+)/kernel-interview$", path)
+            if m_ki:
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                slug = m_ki.group(1)
+                if not _SLUG_RE.match(slug):
+                    st, b, h = _json_bytes({"error": "invalid slug"}, 400)
+                    self._send(st, b, h)
+                    return
+                st, b, h = _json_bytes(read_kernel_interview(root, slug))
+                self._send(st, b, h)
+                return
+
+            if path == "/api/kernel/plugins":
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                ok, data = _run_kernel_helper(root, ["plugins"], timeout=30)
+                if ok:
+                    data["unverified"] = sorted(_kernel_unverified_set(root))
+                st, b, h = _json_bytes(data, 200 if ok else 502)
+                self._send(st, b, h)
+                return
+
+            if path == "/api/kernel/service":
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                ok, data = _kernel_service_status_cached(root)
+                st, b, h = _json_bytes(data, 200 if ok else 502)
+                self._send(st, b, h)
+                return
+
+            if path == "/api/kernel/runs":
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                st, b, h = _json_bytes({"runs": _kernel_list_records(root)})
+                self._send(st, b, h)
+                return
+
+            m_klog = re.match(r"^/api/kernel/runs/([^/]+)/log$", path)
+            if m_klog:
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                run_uid = m_klog.group(1)
+                if not _KERNEL_ID_RE.match(run_uid):
+                    st, b, h = _json_bytes({"error": "invalid run id"}, 400)
+                    self._send(st, b, h)
+                    return
+                lp = _kernel_run_log_path(root, run_uid)
+                text = ""
+                if lp.is_file():
+                    try:
+                        # tail (~24KB) so a long build log stays cheap to poll
+                        text = lp.read_bytes()[-24000:].decode("utf-8", "replace")
+                    except OSError:
+                        text = ""
+                st, b, h = _json_bytes({"log": text})
+                self._send(st, b, h)
+                return
+
+            m_krun = re.match(r"^/api/kernel/runs/([^/]+)$", path)
+            if m_krun:
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                run_uid = m_krun.group(1)
+                if not _KERNEL_ID_RE.match(run_uid):
+                    st, b, h = _json_bytes({"error": "invalid run id"}, 400)
+                    self._send(st, b, h)
+                    return
+                rec = _kernel_read_record(root, run_uid)
+                if rec is None:
+                    st, b, h = _json_bytes({"error": "not found"}, 404)
+                    self._send(st, b, h)
+                    return
+                if rec.get("run_id") and rec.get("state") == "running":
+                    ok, status = _run_kernel_helper(
+                        root, ["status", "--run-id", rec["run_id"]], timeout=30
+                    )
+                    if ok:
+                        rec["status"] = status
+                st, b, h = _json_bytes(rec)
+                self._send(st, b, h)
+                return
+
             m_wt_cand = re.match(r"^/api/tasks/([^/]+)/worktree-candidates$", path)
             if m_wt_cand:
                 root, _pid = self._resolve_scope(parsed)
@@ -908,6 +1744,52 @@ def make_handler(
                         "worktrees": list(meta.worktrees),
                     }
                 )
+                self._send(st, b, h)
+                return
+
+            m_diff = re.match(r"^/api/tasks/([^/]+)/diff$", path)
+            if m_diff:
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                slug = m_diff.group(1)
+                if not _SLUG_RE.match(slug):
+                    st, b, h = _json_bytes({"error": "invalid slug"}, 400)
+                    self._send(st, b, h)
+                    return
+                meta = read_meta(root, slug)
+                if not meta:
+                    st, b, h = _json_bytes({"error": "not found"}, 404)
+                    self._send(st, b, h)
+                    return
+                meta = detect_and_persist_worktree(root, slug) or meta
+                worktrees = task_worktree_diffs(root, slug)
+                st, b, h = _json_bytes(
+                    {
+                        "slug": slug,
+                        "worktrees": worktrees,
+                    }
+                )
+                self._send(st, b, h)
+                return
+
+            m_mon_get = re.match(r"^/api/tasks/([^/]+)/monitor$", path)
+            if m_mon_get:
+                root, project_id = self._resolve_scope(parsed)
+                if root is None or project_id is None:
+                    self._bad_project()
+                    return
+                slug = m_mon_get.group(1)
+                if not _SLUG_RE.match(slug):
+                    st, b, h = _json_bytes({"error": "invalid slug"}, 400)
+                    self._send(st, b, h)
+                    return
+                if not read_meta(root, slug):
+                    st, b, h = _json_bytes({"error": "not found"}, 404)
+                    self._send(st, b, h)
+                    return
+                st, b, h = _json_bytes(monitor_manager.status(root, project_id, slug))
                 self._send(st, b, h)
                 return
 
@@ -1008,6 +1890,135 @@ def make_handler(
             path = parsed.path
             body = _read_json(self)
 
+            if path == "/api/kernel/runs":
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                plugin = str(body.get("plugin", "")).strip()
+                target = str(body.get("target", "")).strip()
+                model = str(body.get("model", "")).strip()
+                shape = body.get("shape", "")
+                if not plugin or not target or not model or not shape:
+                    st, b, h = _json_bytes(
+                        {"error": "plugin, target, model and shape are required"}, 400
+                    )
+                    self._send(st, b, h)
+                    return
+                run_uid = uuid.uuid4().hex[:12]
+                cfg = {
+                    "plugin": plugin,
+                    "target": target,
+                    "model": model,
+                    "shape": shape,
+                    "n_agents": int(body.get("n_agents", 1) or 1),
+                    "starter_mode": str(body.get("starter_mode", "none") or "none"),
+                    "target_speedup": body.get("target_speedup"),
+                    "auto_terminate": bool(body.get("auto_terminate", False)),
+                    "poll_interval": int(body.get("poll_interval", 60) or 60),
+                    "build": bool(body.get("build", False)),
+                    "build_mode": bool(body.get("build_mode", False)),
+                }
+                if cfg["build_mode"]:
+                    # correctness-first: stop at the first correct kernel; ignore speed
+                    cfg["auto_terminate"] = True
+                    if cfg["target_speedup"] is None:
+                        cfg["target_speedup"] = 0
+                rec = {
+                    "id": run_uid,
+                    "state": "launching",
+                    "config": cfg,
+                    "run_id": None,
+                    "task_slug": None,
+                    "containers": [],
+                    "created_at": time.time(),
+                }
+                _kernel_write_record(root, rec)
+                threading.Thread(
+                    target=_launch_kernel_run, args=(root, run_uid, cfg), daemon=True
+                ).start()
+                st, b, h = _json_bytes({"ok": True, "id": run_uid, "state": "launching"}, 202)
+                self._send(st, b, h)
+                return
+
+            m_kstop = re.match(r"^/api/kernel/runs/([^/]+)/stop$", path)
+            if m_kstop:
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                run_uid = m_kstop.group(1)
+                if not _KERNEL_ID_RE.match(run_uid):
+                    st, b, h = _json_bytes({"error": "invalid run id"}, 400)
+                    self._send(st, b, h)
+                    return
+                rec = _kernel_read_record(root, run_uid)
+                if rec is None:
+                    st, b, h = _json_bytes({"error": "not found"}, 404)
+                    self._send(st, b, h)
+                    return
+                result: dict[str, Any] = {"ok": True}
+                if rec.get("run_id"):
+                    _ok, result = _run_kernel_helper(
+                        root, ["stop", "--run-id", rec["run_id"]], timeout=600
+                    )
+                rec["state"] = "stopped"
+                _kernel_write_record(root, rec)
+                st, b, h = _json_bytes({"ok": True, "stop": result, "run": rec})
+                self._send(st, b, h)
+                return
+
+            if path == "/api/kernel/interview":
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                msgs = body.get("messages", [])
+                if not isinstance(msgs, list):
+                    st, b, h = _json_bytes({"error": "messages must be a list"}, 400)
+                    self._send(st, b, h)
+                    return
+                result = _kernel_interview_turn(msgs, str(body.get("model", "")))
+                st, b, h = _json_bytes(result, 200 if result.get("ok") else 502)
+                self._send(st, b, h)
+                return
+
+            if path == "/api/kernel/prepare":
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                spec = body.get("spec") or {}
+                if not isinstance(spec, dict):
+                    st, b, h = _json_bytes({"error": "spec must be an object"}, 400)
+                    self._send(st, b, h)
+                    return
+                prep_uid = uuid.uuid4().hex[:12]
+                rec = {"id": prep_uid, "state": "resolving", "kind": "prepare",
+                       "spec": spec, "created_at": time.time()}
+                _kernel_write_record(root, rec)
+                threading.Thread(
+                    target=_prepare_kernel_run, args=(root, prep_uid, spec), daemon=True
+                ).start()
+                st, b, h = _json_bytes({"ok": True, "id": prep_uid, "state": "resolving"}, 202)
+                self._send(st, b, h)
+                return
+
+            if path == "/api/kernel/plugins/verify":
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                name = str(body.get("name", "")).strip()
+                if not name:
+                    st, b, h = _json_bytes({"error": "name required"}, 400)
+                    self._send(st, b, h)
+                    return
+                _kernel_set_unverified(root, name, False)
+                st, b, h = _json_bytes({"ok": True, "name": name, "verified": True})
+                self._send(st, b, h)
+                return
+
             if path == "/api/tasks/reorder":
                 root, _project_id = self._resolve_scope(parsed)
                 if root is None:
@@ -1059,6 +2070,7 @@ def make_handler(
                     skills_path=skills_path,
                     interview_model=str(body.get("interview_model", "")),
                     agent=raw_agent or AGENT_CLAUDE,
+                    kind=("kernel" if str(body.get("kind", "")).strip().lower() == "kernel" else "agent"),
                 )
                 cands = list_worktree_candidates(root)
                 hint = ""
@@ -1278,6 +2290,80 @@ def make_handler(
                     data=result,
                 )
                 st, b, h = _json_bytes(result)
+                self._send(st, b, h)
+                return
+
+            m_mon_post = re.match(r"^/api/tasks/([^/]+)/monitor$", path)
+            if m_mon_post:
+                root, project_id = self._resolve_scope(parsed)
+                if root is None or project_id is None:
+                    self._bad_project()
+                    return
+                slug = m_mon_post.group(1)
+                if not _SLUG_RE.match(slug):
+                    st, b, h = _json_bytes({"error": "invalid slug"}, 400)
+                    self._send(st, b, h)
+                    return
+                if not read_meta(root, slug):
+                    st, b, h = _json_bytes({"error": "not found"}, 404)
+                    self._send(st, b, h)
+                    return
+                pattern = str(body.get("pattern", "")).strip()
+                if pattern:
+                    try:
+                        re.compile(pattern)
+                    except re.error as exc:
+                        st, b, h = _json_bytes({"error": f"invalid regex: {exc}"}, 400)
+                        self._send(st, b, h)
+                        return
+                result = monitor_manager.enable(root, project_id, slug, pattern)
+                print(
+                    f"[web] monitor enabled slug={slug} pattern={result.get('pattern', '')!r}",
+                    flush=True,
+                )
+                st, b, h = _json_bytes(result)
+                self._send(st, b, h)
+                return
+
+            m_send = re.match(r"^/api/tasks/([^/]+)/claude/send$", path)
+            if m_send:
+                root, project_id = self._resolve_scope(parsed)
+                if root is None or project_id is None:
+                    self._bad_project()
+                    return
+                slug = m_send.group(1)
+                if not _SLUG_RE.match(slug):
+                    st, b, h = _json_bytes({"error": "invalid slug"}, 400)
+                    self._send(st, b, h)
+                    return
+                meta = read_meta(root, slug)
+                if not meta:
+                    st, b, h = _json_bytes({"error": "not found"}, 404)
+                    self._send(st, b, h)
+                    return
+                target = (meta.tmux_interview_target or "").strip()
+                if not target:
+                    st, b, h = _json_bytes(
+                        {"ok": False, "error": "no active Claude pane for this task"}, 409
+                    )
+                    self._send(st, b, h)
+                    return
+                text = body.get("text", "")
+                if not isinstance(text, str) or not text:
+                    st, b, h = _json_bytes({"ok": False, "error": "text required"}, 400)
+                    self._send(st, b, h)
+                    return
+                submit = bool(body.get("submit", True))
+                ok, msg = send_pane_text(target, text, submit=submit)
+                print(
+                    f"[web] inbound claude/send slug={slug} ok={ok} chars={len(text)}",
+                    flush=True,
+                )
+                st, b, h = (
+                    _json_bytes({"ok": True, "target": target})
+                    if ok
+                    else _json_bytes({"ok": False, "error": msg}, 400)
+                )
                 self._send(st, b, h)
                 return
 
@@ -1515,6 +2601,31 @@ def make_handler(
                 self._send(st, b, h)
                 return
 
+            m_ki_put = re.match(r"^/api/tasks/([^/]+)/kernel-interview$", path)
+            if m_ki_put:
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                slug = m_ki_put.group(1)
+                if not _SLUG_RE.match(slug):
+                    st, b, h = _json_bytes({"error": "invalid slug"}, 400)
+                    self._send(st, b, h)
+                    return
+                messages = body.get("messages", [])
+                if not isinstance(messages, list):
+                    st, b, h = _json_bytes({"error": "messages must be a list"}, 400)
+                    self._send(st, b, h)
+                    return
+                spec = body.get("spec")
+                if not write_kernel_interview(root, slug, messages, spec):
+                    st, b, h = _json_bytes({"error": "failed to save kernel interview"}, 500)
+                    self._send(st, b, h)
+                    return
+                st, b, h = _json_bytes({"ok": True})
+                self._send(st, b, h)
+                return
+
             m_meta = re.match(r"^/api/tasks/([^/]+)/meta$", path)
             if m_meta:
                 root, _pid = self._resolve_scope(parsed)
@@ -1529,9 +2640,10 @@ def make_handler(
                 title = body.get("title")
                 goal = body.get("general_goal")
                 agent_in = body.get("agent")
-                if title is None and goal is None and agent_in is None:
+                skills_in = body.get("skills_path")
+                if title is None and goal is None and agent_in is None and skills_in is None:
                     st, b, h = _json_bytes(
-                        {"error": "supply title and/or general_goal and/or agent"},
+                        {"error": "supply title and/or general_goal and/or agent and/or skills_path"},
                         400,
                     )
                     self._send(st, b, h)
@@ -1546,6 +2658,18 @@ def make_handler(
                         self._send(st, b, h)
                         return
                     update_meta(root, slug, agent=raw)
+                if skills_in is not None:
+                    try:
+                        cand = Path(str(skills_in)).expanduser().resolve()
+                    except OSError as exc:
+                        st, b, h = _json_bytes({"error": f"invalid skills_path: {exc}"}, 400)
+                        self._send(st, b, h)
+                        return
+                    if not cand.is_file() or cand.suffix.lower() != ".md":
+                        st, b, h = _json_bytes({"error": "skills_path must be a markdown file"}, 400)
+                        self._send(st, b, h)
+                        return
+                    update_meta(root, slug, skills_path=str(cand))
                 updated = rename_task_meta(
                     root,
                     slug,
@@ -1594,6 +2718,27 @@ def make_handler(
                 return
             parsed = urlparse(self.path)
             path = parsed.path
+
+            m_mon_del = re.match(r"^/api/tasks/([^/]+)/monitor$", path)
+            if m_mon_del:
+                root, project_id = self._resolve_scope(parsed)
+                if root is None or project_id is None:
+                    self._bad_project()
+                    return
+                slug = m_mon_del.group(1)
+                if not _SLUG_RE.match(slug):
+                    st, b, h = _json_bytes({"error": "invalid slug"}, 400)
+                    self._send(st, b, h)
+                    return
+                if not read_meta(root, slug):
+                    st, b, h = _json_bytes({"error": "not found"}, 404)
+                    self._send(st, b, h)
+                    return
+                result = monitor_manager.disable(root, project_id, slug)
+                print(f"[web] monitor disabled slug={slug}", flush=True)
+                st, b, h = _json_bytes(result)
+                self._send(st, b, h)
+                return
 
             m_wt_del = re.match(r"^/api/tasks/([^/]+)/worktree$", path)
             if m_wt_del:
@@ -1711,6 +2856,20 @@ def serve(
         web_project_registry.prune_redundant_parent_projects(project_root)
     claude_registry = ClaudeRegistry()
     openclaw_client = OpenClawClient(openclaw_config)
+    # A launch/prepare runs in a background thread that does NOT survive a server
+    # restart, leaving its run record stuck at "launching"/"resolving" forever.
+    # On startup, no launch can be in flight, so sweep any such records to error.
+    _sweep_roots = {project_root}
+    try:
+        for _p in web_project_registry.list_projects():
+            _pp = _p.get("path")
+            if _pp:
+                _sweep_roots.add(Path(_pp))
+    except Exception:  # noqa: BLE001
+        pass
+    _swept = _sweep_stale_kernel_runs(list(_sweep_roots))
+    if _swept:
+        print(f"  Swept {_swept} stale kernel run(s) (launching/resolving -> error)", flush=True)
     sk = default_skills if default_skills.is_file() else bundled_skills_path().resolve()
     handler = make_handler(
         web_project_registry,
