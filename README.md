@@ -4,13 +4,13 @@
 
 <h1 align="center">Loom</h1>
 
-<p align="center"><em>Repeat Until Done.</em></p>
+<p align="center"><em>You drive Claude Code / Codex — Loom keeps the worktrees, plans, diffs, and notes tidy.</em></p>
 
 **Loom** is a lightweight task console for [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 (and Codex). You give each task a goal, a deep‑interview pane refines it into a
 `PLAN.md`, you spin up git worktrees on `zhongzhu/<slug>` branches and `/goal`
 your way through the work, review the diff, and optionally get pinged whenever
-the agent stops and needs you. *Repeat Until Done.*
+the agent stops and needs you.
 
 There is no autonomous agent loop, no worker, and no evaluator — **you drive the
 agent**; Loom just removes the bookkeeping: worktrees, `PLAN.md`, diffs,
@@ -43,7 +43,7 @@ it, and write progress/results back into `PLAN.md` — then iterate.
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-(The `.RUD/` directory name is a nod to the tagline, *Repeat Until Done*.)
+(`.RUD/` is Loom's per-project task directory.)
 
 ## Install
 
@@ -84,7 +84,7 @@ Useful flags:
 | `--projects` | Multi-project workspace: the launch dir is a container; the parent registry entry is pruned once children are registered. |
 | `--auth-token TOKEN` | Require HTTP basic / bearer auth. Username is ignored; password = token. Also reads `CLAUDELOOP_WEB_AUTH_TOKEN`. |
 | `--daemon` / `--nohup` | Re-spawn in the background and exit. Logs land in `<project>/.RUD/web.log`. |
-| `--openclaw …` | Optional [OpenClaw](#run-monitor--openclaw) gateway events (used by the run monitor). Full flag list in `claudeloop/cli.py`. |
+| `--openclaw …` | Optional [OpenClaw](#openclaw-integration) gateway events (run-monitor notifications + reply-back). Full flag list in `claudeloop/cli.py`. |
 
 ```bash
 loom init    # writes a minimal PLAN.md + NOTES.md in $PWD
@@ -134,7 +134,7 @@ The main tab for an agent task contains:
     `~/.claude/projects/<encoded-cwd>/` or the Codex equivalent). **Resume**
     launches a fresh tmux pane with `--resume <uuid>`, even if the original
     tmux was killed.
-  - **Monitor** — a Notify toggle (see [below](#run-monitor--openclaw)).
+  - **Monitor** — a Notify toggle (see [OpenClaw integration](#openclaw-integration)).
 - **Live tmux pane** preview (polls every ~4s, auto-scrolls to the bottom) with
   a keycap row (↑ ↓ ← → Enter Esc Ctrl-C) next to the input.
 - **Embedded read-only Markdown viewer** — defaults to `PLAN.md`, with a picker
@@ -157,13 +157,13 @@ e.g. `origin/main`). Refreshes on tab open and via the Refresh button.
 Flip **Notify** on the Monitor row to have Loom watch the agent's tmux pane. It
 edge-triggers on the **running → stopped** transition: when the agent was
 working (the pane shows its “esc to interrupt” hint) and then stops to wait for
-input, Loom emits an [OpenClaw](https://github.com/) event with the last lines
-of the pane for context. Reply in OpenClaw and it is pushed back into the pane
+input, Loom emits an OpenClaw event with the last lines of the pane for context.
+Reply in OpenClaw and it is pushed back into the pane
 (`POST /api/tasks/<slug>/claude/send`), the agent runs again, and you're pinged
 on the next stop — repeat. If the pane is already idle when you enable Notify,
 it stays silent until the agent actually runs and then stops.
 
-Configure the gateway with the `--openclaw*` flags (URL, token, hook, etc.).
+See [OpenClaw integration](#openclaw-integration) for setup.
 
 ### 6. PLAN.md & Notes
 
@@ -179,6 +179,64 @@ Kernel-optimization tasks get a dedicated panel that drives the TKCC kernel
 evaluator: a persistent interview to produce a kernel spec, worktree management,
 and a build/run launcher with a live log. This is an advanced, optional task
 type; regular Claude/Codex tasks don't need it.
+
+## OpenClaw integration
+
+Loom can push events to an OpenClaw gateway. The headline use is the **run
+monitor**: you get pinged (e.g. in Slack) whenever an agent stops and is waiting
+for input, and your reply is sent straight back into its pane.
+
+### Enable it
+
+Launch Loom with the OpenClaw flags. Use the **`/hooks/agent`** endpoint with
+`--openclaw-deliver` so messages are actually delivered — the lighter
+`/hooks/wake` endpoint only *wakes* an agent and does not post a message:
+
+```bash
+loom web --project /path/to/project \
+  --openclaw \
+  --openclaw-url http://127.0.0.1:18789/hooks/agent \
+  --openclaw-deliver \
+  --openclaw-token <gateway-token> \
+  --openclaw-debug            # logs each POST + HTTP status
+```
+
+Add `--openclaw-channel <#channel>` or `--openclaw-to <user>` if your gateway
+needs an explicit destination. (Full flag list: `claudeloop/cli.py`.)
+
+### What Loom sends
+
+Loom emits lifecycle events — `task-created`, `claude-start` / `claude-stop`,
+`worktree-created`, … — and, when a task's **Monitor** toggle is on, an
+`agent-stopped` event each time that agent finishes a turn / waits for input,
+carrying the last lines of the pane for context. The stop is detected by
+watching the agent's "working" hint (`esc to interrupt`) and firing when it
+disappears, so it does not depend on any particular "done" wording.
+
+### Replying back into the pane
+
+Your OpenClaw agent continues a task by calling Loom's inbound endpoint:
+
+```
+POST /api/tasks/<slug>/claude/send   {"text": "check the current pods", "submit": true}
+```
+
+It types the message into that task's live agent pane (auth header +
+`?project=<id>` apply). The full loop is: **agent stops → OpenClaw pings you →
+you reply → the reply lands in the pane → the agent continues → repeat.**
+
+### Gateway on another host
+
+If OpenClaw runs elsewhere, bridge the two with an SSH reverse tunnel from the
+Loom machine, then point OpenClaw at `http://127.0.0.1:8765/`:
+
+```bash
+ssh -f -N -L 18789:127.0.0.1:18789 -R 8765:127.0.0.1:8765 user@gateway-host
+```
+
+The bundled `claudeloop/skills/remote_control/` skill documents the full Loom
+HTTP API for an OpenClaw agent (auth, project scoping, reading panes, sending
+text, etc.).
 
 ## Storage layout
 
@@ -243,13 +301,3 @@ Everything is plain JSON; scope with `?project=<id>` (or the
 Kernel Lab adds `/api/kernel/*` endpoints. For backwards compatibility,
 `/api/tasks/<slug>/interview/{start,stop,paste-prompt}` still resolves to the
 agent-pane endpoints.
-
-## History
-
-Loom started life as **claudeloop** — a full autonomous agent loop with
-runner / evaluator panes, an `Ask` pane, `TASK_PROMPT.md` +
-`SUCCESS_CONDITION.md`, and auto-commit. That loop was removed on purpose: the
-project became **RUD (Repeat Until Done)** and then **Loom**, a human-driven
-console where you drive Claude Code / Codex and Loom keeps the worktrees,
-plans, diffs, and notes tidy. The internal Python module is still named
-`claudeloop`. See `git log` for the full history.
