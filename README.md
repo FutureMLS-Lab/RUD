@@ -1,4 +1,10 @@
-# Loom
+<p align="center">
+  <img src="claudeloop/web_static/loom-logo.png" alt="Loom" width="200" />
+</p>
+
+<h1 align="center">Loom</h1>
+
+<p align="center"><em>Repeat Until Done.</em></p>
 
 **Loom** is a lightweight task console for [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 (and Codex). You give each task a goal, a deep‑interview pane refines it into a
