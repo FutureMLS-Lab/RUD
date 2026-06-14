@@ -70,6 +70,9 @@ const STATE = {
   changesData: null,
   changesSelected: '',
   changesLoading: false,
+  // True while a monitor enable/disable request is in flight, so the 4s
+  // poll's loadMonitor() doesn't reset the toggle the user just clicked.
+  monitorBusy: false,
 };
 
 let PROJECT_DRAG_ID = '';
@@ -175,6 +178,7 @@ function showPanel(id) {
     deferIdle(refreshInterviewPreview);
     deferIdle(refreshTaskTemplates);
     deferIdle(refreshClaudeSessions);
+    deferIdle(loadMonitor);
   }
   if (id === 'changes') {
     refreshChangesView();
@@ -1550,23 +1554,22 @@ function formatMonitorTime(iso) {
 }
 
 function applyMonitorState(d) {
-  const input = document.getElementById('monitor-pattern');
   const toggle = document.getElementById('monitor-toggle');
-  const status = document.getElementById('monitor-status');
-  if (!input || !toggle || !status) return;
+  if (!toggle) return;
   const running = !!(d && d.running);
   toggle.checked = running;
-  if (document.activeElement !== input) {
-    input.value = (d && d.pattern) || '';
+  // No "off"/"on" word - the toggle itself shows state. Only surface the
+  // last-fired info when there's something to report.
+  const status = document.getElementById('monitor-status');
+  if (status) {
+    let txt = '';
+    if (d && d.last_fired) {
+      txt = 'last fired ' + formatMonitorTime(d.last_fired);
+      if (d.last_match) txt += ' (' + d.last_match + ')';
+    }
+    status.textContent = txt;
+    status.classList.toggle('is-on', running);
   }
-  if (d && d.default_pattern) input.title = 'Default: ' + d.default_pattern;
-  let txt = running ? 'watching the pane' : 'off';
-  if (d && d.last_fired) {
-    txt += ' · last fired ' + formatMonitorTime(d.last_fired);
-    if (d.last_match) txt += ' (' + d.last_match + ')';
-  }
-  status.textContent = txt;
-  status.classList.toggle('is-on', running);
 }
 
 async function loadMonitor() {
@@ -1574,7 +1577,9 @@ async function loadMonitor() {
   const slug = STATE.slug;
   try {
     const d = await api('/api/tasks/' + encodeURIComponent(slug) + '/monitor');
-    if (STATE.slug !== slug) return;
+    // Don't clobber the toggle/input while the user is mid-action or has
+    // switched tasks - the in-flight setMonitor() is the source of truth.
+    if (STATE.slug !== slug || STATE.monitorBusy) return;
     applyMonitorState(d);
   } catch (err) {
     console.debug('loadMonitor failed', err);
@@ -1584,14 +1589,15 @@ async function loadMonitor() {
 async function setMonitor(enabled) {
   if (!STATE.slug) return;
   const slug = STATE.slug;
-  const input = document.getElementById('monitor-pattern');
   const status = document.getElementById('monitor-status');
+  STATE.monitorBusy = true;
   try {
     let d;
     if (enabled) {
+      // No pattern from the UI - the backend uses its hardcoded default.
       d = await api('/api/tasks/' + encodeURIComponent(slug) + '/monitor', {
         method: 'POST',
-        body: JSON.stringify({ pattern: (input && input.value || '').trim() }),
+        body: JSON.stringify({}),
       });
     } else {
       d = await api('/api/tasks/' + encodeURIComponent(slug) + '/monitor', { method: 'DELETE' });
@@ -1600,7 +1606,10 @@ async function setMonitor(enabled) {
     applyMonitorState(d);
   } catch (err) {
     if (status) status.textContent = 'error: ' + err.message;
+    STATE.monitorBusy = false;
     loadMonitor();
+  } finally {
+    STATE.monitorBusy = false;
   }
 }
 
@@ -2690,7 +2699,6 @@ function renderClaudeInfo(meta, claude, statuses) {
     statuses,
     'Primary — the Claude pane opens in this worktree',
   );
-  loadMonitor();
   if (tmuxEl) tmuxEl.textContent = claude.tmux_target || meta.tmux_interview_target || '(not started)';
   if (pillEl) {
     const alive = !!claude.tmux_alive;
@@ -2980,16 +2988,7 @@ document.getElementById('btn-changes-refresh').addEventListener('click', () => r
 
 (() => {
   const toggle = document.getElementById('monitor-toggle');
-  const input = document.getElementById('monitor-pattern');
   if (toggle) toggle.addEventListener('change', () => setMonitor(toggle.checked));
-  if (input) {
-    input.addEventListener('change', () => {
-      if (toggle && toggle.checked) setMonitor(true);
-    });
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); if (toggle) { toggle.checked = true; } setMonitor(true); }
-    });
-  }
 })();
 
 document.getElementById('btn-interview-stop').addEventListener('click', async () => {

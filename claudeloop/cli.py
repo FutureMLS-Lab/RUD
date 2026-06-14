@@ -1,10 +1,12 @@
-"""CLI entry point for claudeloop.
+"""CLI entry point for Loom.
 
 Only two commands now that the agent-loop machinery is gone:
-- ``claudeloop init`` writes the minimal PLAN.md / NOTES.md templates
+- ``loom init`` writes the minimal PLAN.md / NOTES.md templates
   into the current directory.
-- ``claudeloop web`` runs the local web UI for browsing / editing tasks
+- ``loom web`` runs the local web UI for browsing / editing tasks
   and launching the deep-interview pane.
+
+(``claudeloop`` remains as a legacy alias for ``loom``.)
 """
 
 from __future__ import annotations
@@ -22,8 +24,8 @@ from claudeloop.openclaw import build_openclaw_config, openclaw_status
 from claudeloop.paths import bundled_skills_path
 
 app = typer.Typer(
-    name="claudeloop",
-    help="Lightweight task console for Claude Code (interview + PLAN.md + NOTES.md).",
+    name="loom",
+    help="Loom - a lightweight task console for Claude Code / Codex (deep interview + PLAN.md + worktrees + diffs + notes).",
     add_completion=False,
 )
 console = Console()
@@ -111,12 +113,12 @@ def web_cmd(
     openclaw: bool = typer.Option(
         False,
         "--openclaw",
-        help="Enable direct claudeloop -> OpenClaw gateway events",
+        help="Enable direct Loom -> OpenClaw gateway events",
     ),
     openclaw_url: str | None = typer.Option(
         None,
         "--openclaw-url",
-        help="OpenClaw gateway URL to POST claudeloop events to",
+        help="OpenClaw gateway URL to POST Loom events to",
     ),
     openclaw_token: str | None = typer.Option(
         None,
@@ -131,7 +133,7 @@ def web_cmd(
     openclaw_config: Path | None = typer.Option(
         None,
         "--openclaw-config",
-        help="claudeloop OpenClaw JSON config with url, headers, timeout, enabled",
+        help="Loom OpenClaw JSON config with url, headers, timeout, enabled",
     ),
     openclaw_timeout_ms: int = typer.Option(
         10000,
@@ -176,7 +178,7 @@ def web_cmd(
     openclaw_debug: bool = typer.Option(
         False,
         "--openclaw-debug",
-        help="Enable claudeloop OpenClaw debug logging",
+        help="Enable Loom OpenClaw debug logging",
     ),
     projects: bool = typer.Option(
         False,
@@ -270,7 +272,7 @@ def web_cmd(
                 start_new_session=True,
                 close_fds=True,
             )
-        console.print(f"[green]claudeloop web started in background[/green] pid={proc.pid}")
+        console.print(f"[green]Loom started in background[/green] pid={proc.pid}")
         console.print(f"[dim]URL:[/dim] http://{host}:{port}/")
         console.print(f"[dim]Log:[/dim] {log_path}")
         if openclaw_cfg.enabled:

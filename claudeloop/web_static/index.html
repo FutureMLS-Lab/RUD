@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Loom</title>
   <link rel="icon" type="image/png" href="/static/loom-logo.png" />
-  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/app.css?v=20260613-5" />
 </head>
 <body>
   <header class="topbar">
@@ -136,13 +136,12 @@
             <div class="claude-info__row claude-info__row--monitor">
               <span class="claude-info__label">Monitor</span>
               <div class="claude-info__monitor">
-                <input type="text" id="monitor-pattern" class="monitor-pattern" placeholder="regex to watch in the pane" spellcheck="false" />
-                <label class="monitor-toggle" title="Watch the Claude pane and notify OpenClaw on match">
-                  <input type="checkbox" id="monitor-toggle" />
-                  <span class="monitor-toggle__track"><span class="monitor-toggle__thumb"></span></span>
-                  <span class="monitor-toggle__text">Notify</span>
+                <label class="switch" title="Notify via OpenClaw each time the agent stops and waits for input (reply in OpenClaw to continue it). Stays silent if it's already idle when you turn this on.">
+                  <input type="checkbox" id="monitor-toggle" class="switch__input" />
+                  <span class="switch__track"><span class="switch__thumb"></span></span>
+                  <span class="switch__text">Notify</span>
                 </label>
-                <span class="claude-info__hint monitor-status" id="monitor-status">off</span>
+                <span class="claude-info__hint monitor-status" id="monitor-status"></span>
               </div>
             </div>
           </div>
@@ -401,6 +400,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260613-5"></script>
 </body>
 </html>

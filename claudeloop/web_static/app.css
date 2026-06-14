@@ -1468,7 +1468,7 @@ label { display: block; margin-top: 10px; font-size: 0.85rem; color: var(--text-
   color: var(--text);
 }
 .claude-info__row--sessions {
-  align-items: flex-start;
+  align-items: center;
   flex-wrap: wrap;
 }
 .claude-info__label {
@@ -1546,31 +1546,37 @@ label { display: block; margin-top: 10px; font-size: 0.85rem; color: var(--text-
 
 /* === Run monitor row === */
 
-.claude-info__row--monitor { align-items: center; flex-wrap: wrap; }
+.claude-info__row--monitor { align-items: center; flex-wrap: nowrap; }
+.claude-info__row--monitor .claude-info__label { align-self: center; }
 .claude-info__monitor {
-  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 10px; flex-wrap: nowrap;
 }
-.monitor-pattern {
-  flex: 1 1 220px; min-width: 150px; font-family: var(--font-mono); font-size: 0.8rem;
-  padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
-  background: var(--bg-elev-1); color: var(--text);
+/* Clean on/off switch - label + pill stay on one line */
+.switch {
+  position: relative; flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 8px;
+  cursor: pointer; user-select: none; white-space: nowrap;
 }
-.monitor-pattern:focus { outline: none; border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-soft); }
-.monitor-toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; flex: 0 0 auto; user-select: none; }
-.monitor-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
-.monitor-toggle__track {
-  width: 34px; height: 20px; border-radius: 999px; background: var(--border-strong);
-  position: relative; transition: background 0.15s; flex: 0 0 auto;
+.switch__input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+.switch__track {
+  position: relative; flex: 0 0 auto; width: 38px; height: 22px; border-radius: 999px;
+  background: var(--border-strong); transition: background 0.18s ease;
 }
-.monitor-toggle__thumb {
-  position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 999px;
-  background: #fff; box-shadow: var(--shadow-sm); transition: transform 0.15s;
+.switch__thumb {
+  position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(15, 17, 32, 0.3); transition: transform 0.18s ease;
 }
-.monitor-toggle input:checked + .monitor-toggle__track { background: var(--accent); }
-.monitor-toggle input:checked + .monitor-toggle__track .monitor-toggle__thumb { transform: translateX(14px); }
-.monitor-toggle input:focus-visible + .monitor-toggle__track { box-shadow: 0 0 0 3px var(--accent-soft); }
-.monitor-toggle__text { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); }
-.monitor-status.is-on { color: var(--good); font-style: normal; }
+.switch__input:checked + .switch__track { background: var(--accent); }
+.switch__input:checked + .switch__track .switch__thumb { transform: translateX(16px); }
+.switch__input:focus-visible + .switch__track { box-shadow: 0 0 0 3px var(--accent-soft); }
+.switch__text { font-size: 0.82rem; font-weight: 600; line-height: 1; color: var(--text-dim); transition: color 0.18s ease; white-space: nowrap; }
+.switch__input:checked ~ .switch__text { color: var(--accent); }
+.monitor-status {
+  flex: 0 1 auto; min-width: 0; font-style: normal; line-height: 1; color: var(--text-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.monitor-status.is-on { color: var(--good); }
 
 /* === Worktree list (per task) === */
 

@@ -22,7 +22,7 @@ class OpenClawConfig:
     debug: bool = False
     hook: str = "wake"
     wake_mode: str = "now"
-    agent_name: str = "claudeloop"
+    agent_name: str = "loom"
     agent_id: str = ""
     deliver: bool = False
     channel: str = ""
@@ -104,7 +104,7 @@ def build_openclaw_config(
         debug=cfg_debug,
         hook=cfg_hook,
         wake_mode=cfg_wake_mode,
-        agent_name=str(agent_name or data.get("agent_name", data.get("name", "claudeloop"))),
+        agent_name=str(agent_name or data.get("agent_name", data.get("name", "loom"))),
         agent_id=str(agent_id or data.get("agent_id", data.get("agentId", ""))),
         deliver=bool(deliver if deliver is not None else data.get("deliver", False)),
         channel=str(channel or data.get("channel", "")),
@@ -128,7 +128,7 @@ def config_from_environment() -> OpenClawConfig:
         debug=os.environ.get("CLAUDELOOP_OPENCLAW_DEBUG", "") == "1",
         hook=os.environ.get("CLAUDELOOP_OPENCLAW_HOOK", "wake"),
         wake_mode=os.environ.get("CLAUDELOOP_OPENCLAW_WAKE_MODE", "now"),
-        agent_name=os.environ.get("CLAUDELOOP_OPENCLAW_AGENT_NAME", "claudeloop"),
+        agent_name=os.environ.get("CLAUDELOOP_OPENCLAW_AGENT_NAME", "loom"),
         agent_id=os.environ.get("CLAUDELOOP_OPENCLAW_AGENT_ID", ""),
         deliver=os.environ.get("CLAUDELOOP_OPENCLAW_DELIVER", "") == "1",
         channel=os.environ.get("CLAUDELOOP_OPENCLAW_CHANNEL", ""),
@@ -159,7 +159,7 @@ class OpenClawClient:
         if not self.enabled:
             return
         details: dict[str, Any] = {
-            "source": "claudeloop",
+            "source": "loom",
             "event": event,
             "projectRoot": str(project_root),
         }
@@ -169,7 +169,7 @@ class OpenClawClient:
             details["repo"] = repo
         if data:
             details["data"] = data
-        text = f"{instruction}\n\nclaudeloop event:\n{json.dumps(details, ensure_ascii=False, indent=2)}"
+        text = f"{instruction}\n\nLoom event:\n{json.dumps(details, ensure_ascii=False, indent=2)}"
         if self.config.hook == "agent":
             payload: dict[str, Any] = {
                 "message": text,

@@ -204,44 +204,23 @@ def _launch_root_child_dirs(launch_root: Path, *, limit: int = 200) -> list[dict
     return out
 
 
-_SKIP_MARKDOWN_SCAN_DIRS = frozenset(
-    {
-        ".cache",
-        ".git",
-        ".hg",
-        ".mypy_cache",
-        ".next",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".svn",
-        ".tox",
-        ".venv",
-        "__pycache__",
-        "build",
-        "dist",
-        "node_modules",
-        "target",
-        "venv",
-    }
-)
-
-
 def _available_skill_options(
     default_skills: Path,
-    project_root: Path | None = None,
+    project_root: Path | None = None,  # kept for call-site compatibility; unused
     *,
     limit: int = 500,
 ) -> list[dict[str, str]]:
-    """Return selectable skill markdown files for the web UI."""
+    """Return selectable skill markdown files for the web UI.
+
+    Scope is intentionally limited to the bundled ``claudeloop/skills``
+    directory (plus the configured default skills file). We do **not** scan
+    the user's project tree, so unrelated README/PLAN/etc. markdown never
+    shows up in the Skills picker - only real skills files are selectable.
+    """
+    del project_root  # skills come only from the skills directory
     seen: set[Path] = set()
     options: list[dict[str, str]] = []
     skills_root = bundled_skills_path().parent
-    project_base: Path | None = None
-    if project_root is not None:
-        try:
-            project_base = project_root.resolve()
-        except OSError:
-            project_base = None
 
     def add(path: Path) -> None:
         try:
@@ -257,38 +236,16 @@ def _available_skill_options(
             return
         seen.add(p)
         label = p.name
-        if project_base is not None:
-            try:
-                label = str(p.relative_to(project_base))
-            except ValueError:
-                pass
-        if label == p.name:
-            try:
-                label = str(p.relative_to(skills_root))
-            except ValueError:
-                pass
+        try:
+            label = str(p.relative_to(skills_root))
+        except ValueError:
+            pass
         options.append({"label": label, "path": str(p)})
 
     add(default_skills)
     if skills_root.is_dir():
         for p in sorted(skills_root.rglob("*.md"), key=lambda x: str(x).lower()):
             add(p)
-    if project_base is not None and project_base.is_dir():
-        try:
-            for dirpath, dirnames, filenames in os.walk(project_base):
-                if len(options) >= limit:
-                    break
-                dirnames[:] = [
-                    d for d in dirnames if d not in _SKIP_MARKDOWN_SCAN_DIRS
-                ]
-                base = Path(dirpath)
-                for filename in sorted(filenames, key=str.lower):
-                    if len(options) >= limit:
-                        break
-                    if filename.lower().endswith(".md"):
-                        add(base / filename)
-        except OSError:
-            pass
     return options
 
 
@@ -745,7 +702,7 @@ def _build_claude_prompt(
     if skills_path.is_file():
         skills = skills_path.read_text(encoding="utf-8", errors="replace")[:12000]
     plan_path = td / PLAN
-    return f"""You are running claudeloop's {agent_label(meta.agent)} pane for this task.
+    return f"""You are running Loom's {agent_label(meta.agent)} pane for this task.
 
 You are in the task directory:
 {td}
@@ -1164,10 +1121,16 @@ class ClaudeRegistry:
 
 # --- Per-task run monitor ---------------------------------------------------
 
-_MONITOR_POLL_SECONDS = 5.0
-_MONITOR_CAPTURE_LINES = 120
-# Don't re-emit for the same sustained match more often than this.
-_MONITOR_FIRE_COOLDOWN = 30.0
+_MONITOR_POLL_SECONDS = 4.0
+_MONITOR_CAPTURE_LINES = 160
+# After a stop is reported, ignore further stops for this long - a guard
+# against the working indicator flickering off for a single poll mid-turn.
+_MONITOR_FIRE_COOLDOWN = 6.0
+
+# Interactive agent CLIs (Claude Code / Codex) show an interrupt hint while
+# actively working. When it disappears, the agent has stopped and is waiting
+# for input - that running -> stopped edge is what the monitor fires on.
+_AGENT_WORKING_RE = re.compile(r"esc to interrupt", re.IGNORECASE)
 
 
 def _iso_now() -> str:
@@ -1175,11 +1138,12 @@ def _iso_now() -> str:
 
 
 class _TaskMonitor:
-    """Background poller that watches a task's Claude tmux pane.
+    """Background poller that watches whether the task's agent pane is working.
 
-    Edge-triggered: it emits an OpenClaw event when the configured
-    regex first appears in the captured pane text (after having been
-    absent), with a short cooldown so a sustained match won't spam.
+    Edge-triggered on the *running -> stopped* transition: when the agent was
+    actively working and then stops (waiting for input), it emits an OpenClaw
+    event. If the pane is already idle when monitoring is switched on, nothing
+    fires until the agent runs and then stops again.
     """
 
     def __init__(
@@ -1188,19 +1152,16 @@ class _TaskMonitor:
         project_root: Path,
         project_id: str,
         slug: str,
-        pattern: str,
+        pattern: str = "",
     ) -> None:
         self.manager = manager
         self.project_root = project_root
         self.project_id = project_id
         self.slug = slug
-        self.pattern = pattern
-        try:
-            self._re = re.compile(pattern)
-        except re.error:
-            self._re = re.compile(re.escape(pattern))
+        self.pattern = pattern  # retained for API/JSON compat; not used to match
         self._stop = threading.Event()
-        self._was_present = False
+        self._was_working = False
+        self._initialized = False
         self._last_fire_ts = 0.0
         self.last_fired = ""
         self.last_match = ""
@@ -1224,8 +1185,6 @@ class _TaskMonitor:
         return (getattr(meta, "tmux_interview_target", "") or "").strip()
 
     def _loop(self) -> None:
-        # Skip the first tick so we don't fire on stale pane content that was
-        # already there when the monitor was switched on.
         if self._stop.wait(_MONITOR_POLL_SECONDS):
             return
         while not self._stop.is_set():
@@ -1233,38 +1192,47 @@ class _TaskMonitor:
                 target = self._current_target()
                 if target:
                     ok, text = capture_pane(target, _MONITOR_CAPTURE_LINES)
-                    if ok and text:
-                        m = self._re.search(text)
-                        present = bool(m)
-                        if present and not self._was_present:
-                            self._fire(m.group(0))
-                        self._was_present = present
+                    if ok:
+                        working = bool(_AGENT_WORKING_RE.search(text or ""))
+                        if not self._initialized:
+                            # Baseline only - never fire on the first read, so
+                            # enabling on an already-idle pane stays silent.
+                            self._was_working = working
+                            self._initialized = True
+                        elif self._was_working and not working:
+                            self._was_working = False
+                            self._fire(text or "")
+                        elif working:
+                            self._was_working = True
             except Exception as exc:  # noqa: BLE001
                 print(f"[monitor] {self.slug} loop error: {exc}", flush=True)
             if self._stop.wait(_MONITOR_POLL_SECONDS):
                 break
 
-    def _fire(self, matched_text: str) -> None:
+    @staticmethod
+    def _tail_snippet(text: str) -> str:
+        lines = [ln.rstrip() for ln in (text or "").splitlines() if ln.strip()]
+        return "\n".join(lines[-12:]).strip()[-600:]
+
+    def _fire(self, pane_text: str) -> None:
         now = time.time()
         if now - self._last_fire_ts < _MONITOR_FIRE_COOLDOWN:
             return
         self._last_fire_ts = now
-        self.last_match = (matched_text or "").strip()[:200]
         self.last_fired = _iso_now()
-        print(
-            f"[monitor] {self.slug} matched {self.last_match!r} -> openclaw",
-            flush=True,
-        )
+        self.last_match = "stopped"
+        snippet = self._tail_snippet(pane_text)
+        print(f"[monitor] {self.slug} agent stopped -> openclaw", flush=True)
         try:
             self.manager.openclaw.emit(
-                "monitor-match",
+                "agent-stopped",
                 instruction=(
-                    f"Loom monitor fired for task {self.slug}: "
-                    f"matched {self.last_match!r}"
+                    f"Loom: the agent in task {self.slug} stopped and is waiting "
+                    f"for input. Reply to this message to continue it."
                 ),
                 project_root=self.project_root,
                 task_slug=self.slug,
-                data={"pattern": self.pattern, "match": self.last_match},
+                data={"event": "agent-stopped", "tail": snippet},
             )
         except Exception as exc:  # noqa: BLE001
             print(f"[monitor] {self.slug} emit error: {exc}", flush=True)
@@ -1338,8 +1306,8 @@ class TaskMonitorManager:
         cfg = read_task_monitor(project_root, slug)
         # Lazily resume a persisted-on monitor that isn't running yet (e.g.
         # after a server restart) so the toggle survives restarts.
-        if (mon is None or not mon.is_alive()) and cfg.get("enabled") and cfg.get("pattern"):
-            return self.enable(project_root, project_id, slug, cfg["pattern"])
+        if (mon is None or not mon.is_alive()) and cfg.get("enabled"):
+            return self.enable(project_root, project_id, slug, cfg.get("pattern", ""))
         running = bool(mon and mon.is_alive())
         return {
             "enabled": running,
@@ -1428,7 +1396,7 @@ def make_handler(
             self.send_response(401)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("WWW-Authenticate", 'Basic realm="claudeloop"')
+            self.send_header("WWW-Authenticate", 'Basic realm="Loom"')
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "close")
             self.end_headers()
@@ -1503,6 +1471,10 @@ def make_handler(
                     idx.read_text(encoding="utf-8"),
                     content_type="text/html; charset=utf-8",
                 )
+                # Never let the browser reuse a stale index.html - it
+                # references the versioned app.css/app.js, so the entry
+                # document must always be fresh.
+                h.append(("Cache-Control", "no-store, must-revalidate"))
                 self._send(st, b, h)
                 return
 
@@ -1518,6 +1490,9 @@ def make_handler(
                     or "application/octet-stream"
                 )
                 st, b, h = _text_bytes(sp.read_bytes(), content_type=mime)
+                # Assets are cache-busted via ?v=... in index.html; still tell
+                # the browser to revalidate so edits show up without a hard refresh.
+                h.append(("Cache-Control", "no-cache"))
                 self._send(st, b, h)
                 return
 
@@ -2093,7 +2068,7 @@ def make_handler(
                 )
                 openclaw_client.emit(
                     "task-created",
-                    instruction=f"claudeloop task created: {meta.slug}",
+                    instruction=f"Loom task created: {meta.slug}",
                     project_root=root,
                     task_slug=meta.slug,
                     data={
@@ -2228,7 +2203,7 @@ def make_handler(
                 )
                 openclaw_client.emit(
                     "claude-start",
-                    instruction=f"claudeloop Claude pane started for task {slug}",
+                    instruction=f"Loom Claude pane started for task {slug}",
                     project_root=root,
                     task_slug=slug,
                     data=result,
@@ -2284,7 +2259,7 @@ def make_handler(
                 result = claude_registry.stop(root, project_id, slug)
                 openclaw_client.emit(
                     "claude-stop",
-                    instruction=f"claudeloop Claude pane stopped for task {slug}",
+                    instruction=f"Loom Claude pane stopped for task {slug}",
                     project_root=root,
                     task_slug=slug,
                     data=result,
@@ -2430,7 +2405,7 @@ def make_handler(
                 updated = detect_and_persist_worktree(root, slug) or read_meta(root, slug)
                 openclaw_client.emit(
                     "worktree-created",
-                    instruction=f"claudeloop worktree created for task {slug}",
+                    instruction=f"Loom worktree created for task {slug}",
                     project_root=root,
                     task_slug=slug,
                     data={"source_repo": src_resolved, "worktree": str(wt), "branch": branch},
@@ -2523,7 +2498,7 @@ def make_handler(
                 )
                 openclaw_client.emit(
                     "worktrees-pushed",
-                    instruction=f"claudeloop pushed worktree branches for task {slug}",
+                    instruction=f"Loom pushed worktree branches for task {slug}",
                     project_root=root,
                     task_slug=slug,
                     data={"results": results},
@@ -2558,7 +2533,7 @@ def make_handler(
                 )
                 openclaw_client.emit(
                     "claude-resume",
-                    instruction=f"claudeloop Claude pane resumed for task {slug}",
+                    instruction=f"Loom Claude pane resumed for task {slug}",
                     project_root=root,
                     task_slug=slug,
                     data={**result, "session_id": sid},
@@ -2780,7 +2755,7 @@ def make_handler(
                     return
                 openclaw_client.emit(
                     "worktree-removed",
-                    instruction=f"claudeloop worktree removed for task {slug}",
+                    instruction=f"Loom worktree removed for task {slug}",
                     project_root=root,
                     task_slug=slug,
                     data={"worktree": str(wt_target)},
@@ -2883,7 +2858,7 @@ def serve(
     server = ThreadingHTTPServer((host, port), handler)
     rud_root = project_root / ".RUD"
     print("", flush=True)
-    print("claudeloop web", flush=True)
+    print("Loom", flush=True)
     print(f"  URL:              http://{host}:{port}/", flush=True)
     print(
         f"  Server cwd:       {project_root}  (--project / launch directory; not auto-registered)"
@@ -2901,7 +2876,7 @@ def serve(
     print("", flush=True)
     openclaw_client.emit(
         "web-start",
-        instruction=f"claudeloop web started for project {project_root}",
+        instruction=f"Loom web started for project {project_root}",
         project_root=project_root,
         data={"url": f"http://{host}:{port}/", "taskRoot": str(rud_root)},
     )
