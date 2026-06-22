@@ -339,12 +339,19 @@ def open_pane_attach(target: str, cols: int = 80, rows: int = 24):
 
 
 def scroll_pane(target: str, direction: str = "up", lines: int = 3) -> tuple[bool, str]:
-    """Scroll a pane's tmux history via copy-mode (what ``Ctrl-b [`` does).
+    """Scroll a pane so the web terminal's wheel/touch-drag browses history.
 
-    Lets the web terminal's mouse/touchpad wheel browse scrollback instead of
-    xterm converting the wheel into arrow keys for the full-screen app. Entering
-    ``copy-mode -e`` is idempotent and auto-exits when the user scrolls back to
-    the bottom, so live output resumes on its own.
+    Two cases, decided from the pane's live state:
+
+    * Normal screen (a shell, or Claude's classic inline renderer): browse tmux
+      scrollback via ``copy-mode -e`` (what ``Ctrl-b [`` does). It's idempotent
+      and auto-exits when you scroll back to the bottom, so live output resumes.
+    * Alternate screen / full-screen app (Claude Code's fullscreen TUI since
+      v2.1.172, plus vim/less/htop): the content lives in the alternate-screen
+      buffer, which has *no* tmux scrollback — copy-mode would show nothing. So
+      forward ``PgUp``/``PgDn`` to the app and let it scroll its own viewport.
+      (Claude's fullscreen scrolls with PgUp/PgDn; the mouse wheel there is
+      unreliable — some versions remap it to arrow keys / prompt history.)
     """
     import shutil
 
@@ -358,19 +365,41 @@ def scroll_pane(target: str, direction: str = "up", lines: int = 3) -> tuple[boo
     except (TypeError, ValueError):
         n = 3
     env = tmux_subprocess_env()
+
+    # Probe the pane: already browsing copy-mode? running a full-screen app?
+    in_mode = False
+    alt_screen = False
+    try:
+        chk = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", t, "#{pane_in_mode},#{alternate_on}"],
+            capture_output=True, text=True, env=env, timeout=5,
+        )
+        parts = (chk.stdout or "").strip().split(",")
+        if len(parts) == 2:
+            in_mode = parts[0] == "1"
+            alt_screen = parts[1] == "1"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    # Full-screen app and not already in tmux copy-mode: scroll the app itself.
+    # PgUp/PgDn move ~half a screen, so collapse the wheel's line count into a
+    # small number of key presses instead of one press per line.
+    if alt_screen and not in_mode:
+        key = "PageDown" if direction == "down" else "PageUp"
+        presses = max(1, min(10, round(n / 8)))
+        cmd = ["tmux", "send-keys", "-t", t] + [key] * presses
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=5)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, str(e)
+        return (r.returncode == 0), (r.stderr or "").strip()
+
     if direction == "down":
         # scroll-down (send-keys -X) only works while the pane is in copy-mode.
         # If it isn't, we're already at the live bottom, so treat it as a
         # successful no-op instead of erroring out with a 400.
-        try:
-            chk = subprocess.run(
-                ["tmux", "display-message", "-p", "-t", t, "#{pane_in_mode}"],
-                capture_output=True, text=True, env=env, timeout=5,
-            )
-            if (chk.stdout or "").strip() != "1":
-                return True, ""
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        if not in_mode:
+            return True, ""
         cmd = ["tmux", "send-keys", "-t", t, "-X", "-N", str(n), "scroll-down"]
     else:
         cmd = [
