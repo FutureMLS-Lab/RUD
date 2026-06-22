@@ -1,0 +1,28 @@
+knowledge_base:
+  enabled: false
+  mount_point: /kb
+  submodule: knowledge_base/kernel-model-resources
+  cuda:
+    path: knowledge_base/kernel-model-resources/nvidia-docs
+  amd:
+    path: knowledge_base/kernel-model-resources/amd-docs
+
+multiagent:
+  roles_file: multiagent/roles.yaml
+  role_set: gemm_specialists
+
+run:
+  plugin: aiter.rms_norm
+  target: hip
+  shapes:
+    - {"m": 64, "n": 7168, "dtype": "bf16"}
+  model: gpt-5.5
+  n_agents: 1
+  start_index: 1
+  target_speedup: null
+  starter_mode: none
+  preset_path: null
+  auto_terminate: false
+  poll_interval: 60
+  image: turbo-kernel-agent
+  container_runtime: podman

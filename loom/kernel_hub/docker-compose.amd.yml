@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: kernel-evaluator-amd-postgres
+    environment:
+      POSTGRES_USER: kernel_evaluator
+      POSTGRES_PASSWORD: kernel_evaluator
+      POSTGRES_DB: kernel_evaluator
+    volumes:
+      - ${KERNEL_EVALUATOR_PG_DATA:?set KERNEL_EVALUATOR_PG_DATA}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  kernel-evaluator-amd:
+    build:
+      context: .
+      dockerfile: Dockerfile.amd
+    container_name: kernel-evaluator-amd
+    depends_on:
+      postgres:
+        condition: service_healthy
+    network_mode: host
+    ipc: host
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_PTRACE
+    ports:
+      - "${KERNEL_EVALUATOR_PORT:?set KERNEL_EVALUATOR_PORT}:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      KERNEL_EVALUATOR_USER_SUBMIT_LIMIT: ${KERNEL_EVALUATOR_USER_SUBMIT_LIMIT:?set KERNEL_EVALUATOR_USER_SUBMIT_LIMIT}
+      KERNEL_EVALUATOR_USER_SUBMIT_WINDOW_S: ${KERNEL_EVALUATOR_USER_SUBMIT_WINDOW_S:?set KERNEL_EVALUATOR_USER_SUBMIT_WINDOW_S}
+      KERNEL_EVALUATOR_USER_IN_FLIGHT_SUBMIT_LIMIT: ${KERNEL_EVALUATOR_USER_IN_FLIGHT_SUBMIT_LIMIT:?set KERNEL_EVALUATOR_USER_IN_FLIGHT_SUBMIT_LIMIT}
+      KERNEL_EVALUATOR_COMPILE_TIMEOUT_S: ${KERNEL_EVALUATOR_COMPILE_TIMEOUT_S:?set KERNEL_EVALUATOR_COMPILE_TIMEOUT_S}
+      KERNEL_EVALUATOR_BENCHMARK_TIMEOUT_S: ${KERNEL_EVALUATOR_BENCHMARK_TIMEOUT_S:?set KERNEL_EVALUATOR_BENCHMARK_TIMEOUT_S}
+      HIPKITTENS_ROOT: ${HIPKITTENS_ROOT:-/opt/HipKittens}
+      THUNDERKITTENS_ROOT: ${THUNDERKITTENS_ROOT:-/opt/HipKittens}
+      XDG_CACHE_HOME: ${XDG_CACHE_HOME:?set XDG_CACHE_HOME}
+      TORCHINDUCTOR_CACHE_DIR: ${TORCHINDUCTOR_CACHE_DIR:?set TORCHINDUCTOR_CACHE_DIR}
+      TRITON_CACHE_DIR: ${TRITON_CACHE_DIR:?set TRITON_CACHE_DIR}
+      PYTHONUNBUFFERED: ${PYTHONUNBUFFERED:?set PYTHONUNBUFFERED}
+    volumes:
+      - kernel_evaluator_amd_artifacts:/tmp/kernel_evaluator
+      - kernel_evaluator_amd_torch_cache:/tmp/torch-cache
+      - ../docs/HipKittens:/opt/HipKittens:ro
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+
+volumes:
+  kernel_evaluator_amd_artifacts:
+  kernel_evaluator_amd_torch_cache:

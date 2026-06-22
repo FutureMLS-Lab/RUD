@@ -1,0 +1,15 @@
+model = "gpt-5.4"
+model_provider = "openai"
+model_reasoning_effort = "xhigh"
+model_reasoning_summary = "concise"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+hide_agent_reasoning = false
+web_search = "cached"
+model_auto_compact_token_limit = 200000
+service_tier = "flex"
+developer_instructions = "You must work until kernel_us < baseline_us (speedup > 1.0x). Do not stop early. Do not try to monkey patch your way into a solution."
+
+[tui]
+notifications = false
+animations = false

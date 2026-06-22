@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loom-kernel-hub"
+version = "0.1.0"
+description = "Loom kernel hub: eval service + agent runner for GPU kernel optimization"
+requires-python = ">=3.12"
+dependencies = ["alembic", "fastapi", "psycopg2-binary", "pyyaml", "sqlmodel", "uvicorn[standard]"]
+
+[project.scripts]
+bench-run = "scaffold.client.bench_cli:cmd_run"
+bench-submit = "scaffold.client.bench_cli:cmd_submit"
+bench-poll = "scaffold.client.bench_cli:cmd_poll"
+bench-result = "scaffold.client.bench_cli:cmd_result"
+bench-best = "scaffold.client.bench_cli:cmd_best"
+bench-archive = "scaffold.client.bench_cli:cmd_archive"
+bench-agent-bests = "scaffold.client.bench_cli:cmd_agent_bests"
+bench-kernel-source = "scaffold.client.bench_cli:cmd_kernel_source"
+bench-artifact = "scaffold.client.bench_cli:cmd_artifact"
+kernel-orchestrator = "scaffold.client.admin_cli:main"
+# Loom Kernel Lab bridge (Loom invokes the bundled scaffold/agent_runner/* helpers).
+rud-kernel = "scaffold.agent_runner.rud_kernel:main"
+rud-resolve-plugin = "scaffold.agent_runner.resolve_plugin:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["replacements*", "kernel_evaluator*", "scaffold", "scaffold.client", "scaffold.agent_runner"]
+
+[tool.setuptools.package-data]
+kernel_evaluator = ["generic_starter_kernels/*.cu", "generic_starter_kernels/*.cpp", "generic_starter_kernels/*.py"]
+

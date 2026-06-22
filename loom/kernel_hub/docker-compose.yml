@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: kernel-evaluator-postgres
+    # This host's docker has no default bridge network (only host/none), so
+    # containers run on the host network like the existing services. Port 5432
+    # is taken by a legacy postgres, so this one listens on 5433.
+    network_mode: host
+    command: ["-p", "5433"]
+    environment:
+      POSTGRES_USER: kernel_evaluator
+      POSTGRES_PASSWORD: kernel_evaluator
+      POSTGRES_DB: kernel_evaluator
+    volumes:
+      - ${KERNEL_EVALUATOR_PG_DATA:?set KERNEL_EVALUATOR_PG_DATA}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\" -p 5433"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  kernel-evaluator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Build RUN steps need the network; this host has no docker bridge, so
+      # build (and run) on the host network.
+      network: host
+    container_name: kernel-evaluator
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      KERNEL_EVALUATOR_USER_SUBMIT_LIMIT: ${KERNEL_EVALUATOR_USER_SUBMIT_LIMIT:?set KERNEL_EVALUATOR_USER_SUBMIT_LIMIT}
+      KERNEL_EVALUATOR_USER_SUBMIT_WINDOW_S: ${KERNEL_EVALUATOR_USER_SUBMIT_WINDOW_S:?set KERNEL_EVALUATOR_USER_SUBMIT_WINDOW_S}
+      KERNEL_EVALUATOR_USER_IN_FLIGHT_SUBMIT_LIMIT: ${KERNEL_EVALUATOR_USER_IN_FLIGHT_SUBMIT_LIMIT:?set KERNEL_EVALUATOR_USER_IN_FLIGHT_SUBMIT_LIMIT}
+      KERNEL_EVALUATOR_COMPILE_TIMEOUT_S: ${KERNEL_EVALUATOR_COMPILE_TIMEOUT_S:?set KERNEL_EVALUATOR_COMPILE_TIMEOUT_S}
+      KERNEL_EVALUATOR_BENCHMARK_TIMEOUT_S: ${KERNEL_EVALUATOR_BENCHMARK_TIMEOUT_S:?set KERNEL_EVALUATOR_BENCHMARK_TIMEOUT_S}
+      THUNDERKITTENS_ROOT: ${THUNDERKITTENS_ROOT:?set THUNDERKITTENS_ROOT}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:?set NVIDIA_VISIBLE_DEVICES}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      XDG_CACHE_HOME: ${XDG_CACHE_HOME:?set XDG_CACHE_HOME}
+      TORCHINDUCTOR_CACHE_DIR: ${TORCHINDUCTOR_CACHE_DIR:?set TORCHINDUCTOR_CACHE_DIR}
+      TRITON_CACHE_DIR: ${TRITON_CACHE_DIR:?set TRITON_CACHE_DIR}
+      PYTHONUNBUFFERED: ${PYTHONUNBUFFERED:?set PYTHONUNBUFFERED}
+      # Load per-task custom plugins from a work dir mounted at /external_plugins.
+      KERNEL_EVALUATOR_EXTRA_PLUGINS_PATH: /external_plugins
+    volumes:
+      # Set KERNEL_EVALUATOR_EXTRA_PLUGINS_HOST=<task work dir plugins> to load a
+      # custom evaluator without rebuilding; defaults to a dir with no plugins (no-op).
+      - ${KERNEL_EVALUATOR_EXTRA_PLUGINS_HOST:-./scaffold/eval}:/external_plugins:ro
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidia1:/dev/nvidia1
+      - /dev/nvidia2:/dev/nvidia2
+      - /dev/nvidia3:/dev/nvidia3
+      - /dev/nvidia4:/dev/nvidia4
+      - /dev/nvidia5:/dev/nvidia5
+      - /dev/nvidia6:/dev/nvidia6
+      - /dev/nvidia7:/dev/nvidia7
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

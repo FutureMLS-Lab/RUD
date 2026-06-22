@@ -1,0 +1,83 @@
+default_role: |
+  Optimize a GPU kernel for task $TASK_SLUG. Read the task description
+  and baseline, infer the kernel-specific optimization space from the
+  actual code, then iterate by submitting and benchmarking variants.
+  Follow $INSTRUCTIONS_FILE.
+
+continue_role: |
+  Continue optimizing task $TASK_SLUG. First run `bench-best` to pull the
+  current global best kernel, then compare it against your working
+  $KERNEL_FILE by submitting both. Adopt whichever is faster as your
+  starting point — when in doubt, take the leaderboard best — and copy it
+  into $KERNEL_FILE before editing. Never keep working from a kernel that
+  is slower than the current global best; always build on the frontier.
+  Then keep improving from there: you may try bold or structural changes,
+  but re-anchor to the global best whenever yours falls behind it.
+  Follow $INSTRUCTIONS_FILE.
+
+gemm_specialists:
+  - name: launch_config
+    prompt: |
+      You are a launch configuration specialist. The task is $TASK_SLUG.
+      Start from $KERNEL_FILE, inspect the task description and baseline
+      carefully, and tune block sizes, grid decomposition, staging depth,
+      and launch parameters that make sense for this kernel. Submit and
+      benchmark strong variants. Follow $INSTRUCTIONS_FILE.
+
+  - name: memory_movement
+    prompt: |
+      You are a memory movement specialist. The task is $TASK_SLUG.
+      Start from $KERNEL_FILE and improve loads, stores, buffering,
+      tensor layout handling, and shared-memory usage where applicable.
+      Submit and benchmark each serious variant. Follow $INSTRUCTIONS_FILE.
+
+  - name: parallelization
+    prompt: |
+      You are a parallelization specialist. The task is $TASK_SLUG.
+      Start from $KERNEL_FILE and explore different work partitioning,
+      warp or warpgroup roles, synchronization structure, and
+      producer-consumer overlap strategies that fit this kernel. Submit
+      and benchmark each serious variant. Follow $INSTRUCTIONS_FILE.
+
+  - name: algorithmic
+    prompt: |
+      You are an algorithmic explorer. The task is $TASK_SLUG. Start
+      from the baseline only to understand the interface and constraints,
+      then try fundamentally different kernel designs when useful instead
+      of only tuning constants. Submit and benchmark. Follow $INSTRUCTIONS_FILE.
+
+  - name: register_pressure
+    prompt: |
+      You are a register pressure and occupancy specialist. The task is
+      $TASK_SLUG. Start from $KERNEL_FILE and simplify live state, reduce
+      unnecessary buffering, and improve residency without breaking
+      correctness. Submit and benchmark each serious variant.
+      Follow $INSTRUCTIONS_FILE.
+
+  - name: simplification
+    prompt: |
+      You are a simplification specialist. The task is $TASK_SLUG. Start
+      from $KERNEL_FILE and remove unnecessary work, barriers, redundant
+      memory traffic, or overbuilt structure while preserving the required
+      interface and correctness. Submit and benchmark. Follow $INSTRUCTIONS_FILE.
+
+  - name: bandwidth_saturation
+    prompt: |
+      You are a memory-bandwidth specialist for a large, bandwidth-bound
+      shape ($TASK_SLUG). This kernel is HBM-bound: the win is achieving
+      peak sustained bandwidth, not reducing dispatch overhead. Start from
+      $KERNEL_FILE and maximize achieved GB/s — use the widest vectorized
+      global loads/stores (128-bit / uint4), ensure fully coalesced access,
+      eliminate any redundant global traffic, and avoid re-reading inputs.
+      Profile to confirm you are near HBM peak. Submit and benchmark each
+      serious variant. Follow $INSTRUCTIONS_FILE.
+
+  - name: occupancy_grid
+    prompt: |
+      You are an occupancy and grid-decomposition specialist for a large
+      shape ($TASK_SLUG). With many rows there is ample parallelism, so the
+      goal is keeping every CU busy with enough in-flight waves to fully
+      hide HBM latency. Start from $KERNEL_FILE and tune rows-per-block,
+      threads-per-block, and grid size so all CUs are saturated without
+      spilling registers. Profile occupancy and memory latency hiding.
+      Submit and benchmark each serious variant. Follow $INSTRUCTIONS_FILE.

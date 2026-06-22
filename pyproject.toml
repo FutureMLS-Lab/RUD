@@ -19,8 +19,10 @@ dev = [
 ]
 
 [project.scripts]
-loom = "claudeloop.cli:app"
-claudeloop = "claudeloop.cli:app"
+loom = "loom.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["claudeloop"]
+packages = ["loom"]
+# Ship the vendored TKCC kernel stack (scripts, Dockerfiles, compose, plugins)
+# as package data even before it's committed / regardless of VCS-ignore.
+artifacts = ["loom/kernel_hub/**"]

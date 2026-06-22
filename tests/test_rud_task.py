@@ -5,8 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import claudeloop.rud_task as rud_task
-from claudeloop.rud_task import (
+import loom.rud_task as rud_task
+from loom.rud_task import (
     PLAN,
     add_claude_session,
     claude_project_dir,
@@ -310,7 +310,7 @@ def test_create_task_skips_worktree_in_non_git_root(tmp_path: Path) -> None:
 def test_detect_worktree_backfills_old_meta(tmp_path: Path) -> None:
     """Tasks created before auto-worktree existed should pick up the worktree
     on next read."""
-    from claudeloop.rud_task import detect_and_persist_worktree
+    from loom.rud_task import detect_and_persist_worktree
 
     repo = tmp_path / "myrepo"
     _git_init_repo(repo)
@@ -341,7 +341,7 @@ def test_detect_worktree_backfills_old_meta(tmp_path: Path) -> None:
 
 
 def test_list_candidates_returns_self_when_project_root_is_git(tmp_path: Path) -> None:
-    from claudeloop.rud_task import list_worktree_candidates
+    from loom.rud_task import list_worktree_candidates
 
     repo = tmp_path / "repo"
     _git_init_repo(repo)
@@ -353,7 +353,7 @@ def test_list_candidates_returns_self_when_project_root_is_git(tmp_path: Path) -
 
 def test_list_candidates_returns_children_when_root_is_container(tmp_path: Path) -> None:
     """Container project root - xorl-style folder holding multiple git clones."""
-    from claudeloop.rud_task import list_worktree_candidates
+    from loom.rud_task import list_worktree_candidates
 
     container = tmp_path / "xorl"
     container.mkdir()
@@ -371,7 +371,7 @@ def test_list_candidates_returns_children_when_root_is_container(tmp_path: Path)
 def test_prepare_task_worktree_from_child_repo(tmp_path: Path) -> None:
     """Verify manual selection of a child repo creates a worktree under the
     *task*, not under the container."""
-    from claudeloop.rud_task import prepare_task_worktree_from
+    from loom.rud_task import prepare_task_worktree_from
 
     container = tmp_path / "xorl"
     container.mkdir()
@@ -388,7 +388,7 @@ def test_prepare_task_worktree_from_child_repo(tmp_path: Path) -> None:
 
 def test_multiple_worktrees_per_task(tmp_path: Path) -> None:
     """Adding a second worktree appends to meta.worktrees instead of replacing."""
-    from claudeloop.rud_task import (
+    from loom.rud_task import (
         detect_and_persist_worktree,
         list_task_worktrees,
         prepare_task_worktree_from,
@@ -438,7 +438,7 @@ def test_multiple_worktrees_per_task(tmp_path: Path) -> None:
 
 
 def test_remove_task_worktree(tmp_path: Path) -> None:
-    from claudeloop.rud_task import (
+    from loom.rud_task import (
         detect_and_persist_worktree,
         prepare_task_worktree_from,
         remove_task_worktree,
@@ -481,7 +481,7 @@ def test_legacy_meta_single_worktree_migrates_to_list(tmp_path: Path) -> None:
 
 
 def test_worktree_status_reports_clean_then_dirty(tmp_path: Path) -> None:
-    from claudeloop.rud_task import worktree_status
+    from loom.rud_task import worktree_status
 
     repo = tmp_path / "r"
     _git_init_repo(repo)
@@ -505,7 +505,7 @@ def test_worktree_status_reports_clean_then_dirty(tmp_path: Path) -> None:
 
 def test_worktree_status_handles_ahead_behind(tmp_path: Path) -> None:
     """Set up an `origin` remote and verify ahead/behind parsing."""
-    from claudeloop.rud_task import worktree_status
+    from loom.rud_task import worktree_status
 
     upstream = tmp_path / "u"
     _git_init_repo(upstream)
@@ -529,7 +529,7 @@ def test_worktree_status_handles_ahead_behind(tmp_path: Path) -> None:
 
 
 def test_list_task_worktree_statuses(tmp_path: Path) -> None:
-    from claudeloop.rud_task import (
+    from loom.rud_task import (
         detect_and_persist_worktree,
         list_task_worktree_statuses,
         prepare_task_worktree_from,
@@ -570,7 +570,7 @@ def test_create_task_with_codex_agent(tmp_path: Path) -> None:
 
 
 def test_normalize_and_label_agent() -> None:
-    from claudeloop.rud_task import agent_label, normalize_agent
+    from loom.rud_task import agent_label, normalize_agent
 
     assert normalize_agent("claude") == "claude"
     assert normalize_agent("CODEX") == "codex"
@@ -582,7 +582,7 @@ def test_normalize_and_label_agent() -> None:
 
 
 def test_build_agent_command_claude() -> None:
-    from claudeloop.rud_task import build_agent_command
+    from loom.rud_task import build_agent_command
 
     cmd = build_agent_command("claude")
     assert cmd[0] == "claude"
@@ -597,7 +597,7 @@ def test_build_agent_command_claude() -> None:
 
 
 def test_build_agent_command_codex() -> None:
-    from claudeloop.rud_task import build_agent_command
+    from loom.rud_task import build_agent_command
 
     cmd = build_agent_command("codex")
     assert cmd == ["codex"]
@@ -627,7 +627,7 @@ def test_meta_migrates_old_task_json_without_agent(tmp_path: Path) -> None:
 
 def test_list_session_files_dispatches_to_codex(tmp_path: Path, monkeypatch) -> None:
     """Codex sessions are matched by ``payload.cwd`` in the rollout file."""
-    from claudeloop.rud_task import (
+    from loom.rud_task import (
         list_session_files,
         session_id_from_path,
     )
@@ -667,7 +667,7 @@ def test_list_session_files_dispatches_to_codex(tmp_path: Path, monkeypatch) -> 
 def test_detect_worktree_clears_stale_path(tmp_path: Path) -> None:
     """A recorded worktree_path that no longer exists on disk should be
     re-detected (and replaced with the on-disk reality, or cleared)."""
-    from claudeloop.rud_task import detect_and_persist_worktree, update_meta
+    from loom.rud_task import detect_and_persist_worktree, update_meta
 
     repo = tmp_path / "r"
     _git_init_repo(repo)
@@ -729,7 +729,7 @@ def test_worktree_diff_captures_uncommitted_and_untracked(tmp_path: Path) -> Non
 
 
 def test_parse_patch_files_splits_per_file() -> None:
-    from claudeloop.rud_task import _parse_patch_files
+    from loom.rud_task import _parse_patch_files
 
     patch = (
         "diff --git a/foo.py b/foo.py\n"

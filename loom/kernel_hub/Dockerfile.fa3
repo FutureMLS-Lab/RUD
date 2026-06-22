@@ -1,0 +1,25 @@
+FROM vllm/vllm-openai:v0.10.2
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ninja-build curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY kernel_evaluator ./kernel_evaluator
+COPY replacements ./replacements
+
+RUN uv pip install --system --no-cache --no-deps -e . \
+    && uv pip install --system --no-cache \
+        alembic fastapi psycopg2-binary pyyaml sqlmodel "uvicorn[standard]" pytest httpx \
+    && mkdir -p /tmp/kernel_evaluator /tmp/torch-cache
+
+ENTRYPOINT []
+
+EXPOSE 8000
+
+CMD ["python3", "-m", "uvicorn", "kernel_evaluator.app:app", "--host", "0.0.0.0", "--port", "8000"]

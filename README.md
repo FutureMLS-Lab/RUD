@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="claudeloop/web_static/loom-logo.png" alt="Loom" width="200" />
+  <img src="loom/web_static/loom-logo.png" alt="Loom" width="200" />
 </p>
 
 <h1 align="center">Loom</h1>
@@ -24,7 +24,7 @@ loom web --project /path/to/your/project    # start the console
 ```
 
 You also need **git** and **tmux** on your PATH. That's it — you're running.
-(`loom` is the command; the old `claudeloop` name still works as an alias.)
+(`loom` is the command; the old `loom` name still works as an alias.)
 
 ## The basic flow
 
@@ -46,7 +46,7 @@ When you're happy, **Push** the worktree or **Merge ↩** it from the Changes ta
 
 1. **Register your project.** Top bar → **+ Add folder**, pointed at a git repo
    (or a container directory holding several repos). Registrations live in
-   `~/.claudeloop/web-projects.json`; nothing is written outside the path.
+   `~/.loom/web-projects.json`; nothing is written outside the path.
 
 2. **Create a task.** **Create Task** asks for a **type** (Claude, Codex, Kernel
    Lab, or ARIS), a **title** (becomes the slug), and a **general goal**. Loom
@@ -90,11 +90,11 @@ When you're happy, **Push** the worktree or **Merge ↩** it from the Changes ta
 | Flag | Purpose |
 |------|---------|
 | `--project PATH` | Project root. Defaults to `$PWD`. A git repo OR a container directory holding several git repos. |
-| `--skills PATH` | Default skills markdown injected into every agent session. Defaults to `claudeloop/skills/charlie_skills.md`. |
+| `--skills PATH` | Default skills markdown injected into every agent session. Defaults to `loom/skills/charlie_skills.md`. |
 | `--projects` | Multi-project workspace: the launch dir is a container of repos. |
-| `--auth-token TOKEN` | Require auth (HTTP basic / bearer; username ignored, password = token). Also reads `CLAUDELOOP_WEB_AUTH_TOKEN`. |
+| `--auth-token TOKEN` | Require auth (HTTP basic / bearer; username ignored, password = token). Also reads `LOOM_WEB_AUTH_TOKEN`. |
 | `--daemon` / `--nohup` | Run in the background. Logs land in `<project>/.RUD/web.log`. |
-| `--openclaw …` | Optional [OpenClaw](#openclaw-integration) notifications + reply-back (full flags in `claudeloop/cli.py`). |
+| `--openclaw …` | Optional [OpenClaw](#openclaw-integration) notifications + reply-back (full flags in `loom/cli.py`). |
 
 ```bash
 loom init    # writes a minimal PLAN.md + NOTES.md in $PWD
@@ -155,7 +155,7 @@ next runs and stops.)
 | Type | What it is |
 |------|------------|
 | **Claude / Codex** | The standard human-driven flow above. |
-| **ARIS** | Autonomous-research loop — mines ideas from the codebase, spins up a worktree per experiment, folds results into `PLAN.md` (skill: `claudeloop/skills/aris/ARIS.md`). |
+| **ARIS** | Autonomous-research loop — mines ideas from the codebase, spins up a worktree per experiment, folds results into `PLAN.md` (skill: `loom/skills/aris/ARIS.md`). |
 | **Kernel Lab** | Dedicated panel driving the TKCC kernel evaluator (spec interview + build/run launcher with live log). Advanced / optional. |
 
 ## OpenClaw integration
@@ -180,7 +180,7 @@ loom web --project /path/to/project \
 ```
 
 Add `--openclaw-channel <#channel>` or `--openclaw-to <user>` if your gateway
-needs an explicit destination. (Full flag list: `claudeloop/cli.py`.)
+needs an explicit destination. (Full flag list: `loom/cli.py`.)
 
 ### What Loom sends
 
@@ -212,7 +212,7 @@ Loom machine, then point OpenClaw at `http://127.0.0.1:8765/`:
 ssh -f -N -L 18789:127.0.0.1:18789 -R 8765:127.0.0.1:8765 user@gateway-host
 ```
 
-The bundled `claudeloop/skills/remote_control/` skill documents the full Loom
+The bundled `loom/skills/remote_control/` skill documents the full Loom
 HTTP API for an OpenClaw agent (auth, project scoping, reading panes, sending
 text, etc.).
 
@@ -235,14 +235,14 @@ text, etc.).
 ~/.claude/projects/<encoded-cwd>/
 └── <session-uuid>.jsonl  # native Claude Code session transcripts
 
-~/.claudeloop/
+~/.loom/
 └── web-projects.json     # registered project paths
 ```
 
 ## HTTP API
 
 Everything is plain JSON; scope with `?project=<id>` (or the
-`X-ClaudeLoop-Project` header). When `--auth-token` is set, send it as
+`X-Loom-Project` header). When `--auth-token` is set, send it as
 `Authorization: Bearer <token>` (or HTTP basic, password = token).
 
 | Method | URL | Purpose |
