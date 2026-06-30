@@ -35,9 +35,38 @@ function taskBackendLabel(meta) {
   return meta.kind === 'aris' ? `ARIS · ${base}` : base;
 }
 
+// Lightweight non-blocking toast (replaces jarring native alert() for transient
+// errors/notices). Stacks bottom-right, auto-dismisses; aria-live for SR users.
+function toast(message, opts = {}) {
+  if (message == null || message === '') return;
+  let host = document.getElementById('app-toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'app-toast-host';
+    host.className = 'toast-host';
+    host.setAttribute('aria-live', 'polite');
+    document.body.appendChild(host);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast' + (opts.type === 'error' ? ' toast--error' : opts.type === 'success' ? ' toast--success' : '');
+  el.setAttribute('role', opts.type === 'error' ? 'alert' : 'status');
+  el.textContent = String(message);
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('is-show'));
+  const ttl = opts.ttl || (opts.type === 'error' ? 6000 : 3500);
+  setTimeout(() => {
+    el.classList.remove('is-show');
+    setTimeout(() => el.remove(), 250);
+  }, ttl);
+}
+
 const STATE = {
   slug: null,
   projectId: null,
+  // Per-project last-selected task slug, so switching projects (or reloading)
+  // restores the task you were on instead of defaulting to none. Persisted in
+  // localStorage; see loadLastTaskMap / rememberSelectedTask / restoreSelectedTaskForProject.
+  lastTaskByProject: {},
   projects: [],
   skillsPath: '',
   skillsOptions: [],
@@ -65,7 +94,7 @@ const STATE = {
   // only: drafts can contain arbitrary user text and shouldn't be written
   // into task metadata or markdown files.
   paneDrafts: {},
-  // Per-task unsent text in the 中文/compose box (same client-only rationale).
+  // Per-task unsent text in the Chinese/compose box (same client-only rationale).
   composeDrafts: {},
   // Embedded read-only markdown viewer on the Claude tab. The picker
   // lets the user flip between any top-level *.md file in the task root;
@@ -73,6 +102,9 @@ const STATE = {
   interviewMdFile: FILES.plan,
   interviewMdFiles: [],
   interviewMdContents: {},
+  // True while the user is editing PLAN.md inline in the Claude-tab viewer.
+  // Guards the 12s poll from clobbering in-progress edits (loadInterviewMdIntoEditor).
+  planEditing: false,
   // Changes tab: cached diff payload + which file is selected.
   changesData: null,
   changesSelected: '',
@@ -351,7 +383,7 @@ async function reorderProjectsByDrag(dragId, targetId, afterTarget) {
     }
     renderProjectToggleBar();
   } catch (e) {
-    alert(e.message);
+    toast(e.message, { type: 'error' });
     await loadProjectsList();
   }
 }
@@ -364,6 +396,7 @@ async function switchProject(id) {
   await loadProjectsList();
   await loadProject();
   await loadTasks();
+  await restoreSelectedTaskForProject();
   await loadTmuxSessions();
 }
 
@@ -375,9 +408,10 @@ async function removeProject(id) {
     await loadProjectsList();
     await loadProject();
     await loadTasks();
+    await restoreSelectedTaskForProject();
     await loadTmuxSessions();
   } catch (e) {
-    alert(e.message);
+    toast(e.message, { type: 'error' });
   }
 }
 
@@ -600,8 +634,11 @@ function escapeHtml(s) {
 
 function renderInlineMarkdown(text) {
   return escapeHtml(text)
+    // Images must run before links (![alt](url) shares the [text](url) shape).
+    .replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g, '<img src="$2" alt="$1" class="md-img" loading="lazy">')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/~~([^~]+)~~/g, '<del>$1</del>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\*([^*]+)\*/g, '<em>$1</em>');
 }
@@ -659,6 +696,15 @@ function renderMarkdown(md) {
       flushList();
       continue;
     }
+    // Horizontal rule: a line of 3+ -, *, or _ (no other content). Checked
+    // before lists/tables; bare "---" has no trailing space so it can't be a
+    // list item, and a table separator always contains "|".
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+      flushParagraph();
+      flushList();
+      out.push('<hr>');
+      continue;
+    }
     if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
       flushParagraph();
       flushList();
@@ -673,7 +719,7 @@ function renderMarkdown(md) {
       out.push(renderTable(headers, rows));
       continue;
     }
-    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
     if (heading) {
       flushParagraph();
       flushList();
@@ -684,7 +730,18 @@ function renderMarkdown(md) {
     if (unordered) {
       flushParagraph();
       if (listType !== 'ul') { flushList(); listType = 'ul'; out.push('<ul>'); }
-      out.push(`<li>${renderInlineMarkdown(unordered[1])}</li>`);
+      // GitHub-style task list: "- [ ] todo" / "- [x] done" -> a (disabled)
+      // checkbox so PLAN.md / NOTES checklists render as real checkboxes.
+      const task = unordered[1].match(/^\[([ xX])\]\s+(.*)$/);
+      if (task) {
+        const checked = task[1].toLowerCase() === 'x' ? ' checked' : '';
+        out.push(
+          `<li class="md-task"><input type="checkbox" disabled${checked}> ` +
+          `${renderInlineMarkdown(task[2])}</li>`
+        );
+      } else {
+        out.push(`<li>${renderInlineMarkdown(unordered[1])}</li>`);
+      }
       continue;
     }
     const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
@@ -840,7 +897,7 @@ function populateInterviewMdSelect() {
     sel.dataset.options = wanted;
   }
   if (sel.value !== current) sel.value = current;
-  updateInterviewMdHint();
+  updatePlanEditUI();
   if (!sel.dataset.bound) {
     sel.dataset.bound = '1';
     sel.addEventListener('change', onInterviewMdSelectChange);
@@ -850,14 +907,19 @@ function populateInterviewMdSelect() {
 function onInterviewMdSelectChange(ev) {
   const name = ev.target.value;
   if (!name || !STATE.interviewMdFiles.includes(name)) return;
+  // Switching files abandons any in-progress PLAN edit.
+  STATE.planEditing = false;
   STATE.interviewMdFile = name;
   loadInterviewMdIntoEditor();
-  updateInterviewMdHint();
+  updatePlanEditUI();
 }
 
 function loadInterviewMdIntoEditor() {
   const editor = document.getElementById('editor-interview');
   if (!editor) return;
+  // Never overwrite the textarea while the user is mid-edit (the 12s poll calls
+  // this); their unsaved changes would vanish.
+  if (STATE.planEditing) return;
   const name = STATE.interviewMdFile;
   const text = STATE.interviewMdContents[name] || '';
   const changed = editor.value !== text;
@@ -876,10 +938,71 @@ function loadInterviewMdIntoEditor() {
 function updateInterviewMdHint() {
   const hint = document.getElementById('interview-md-hint');
   if (!hint) return;
-  if (STATE.interviewMdFile === FILES.plan) {
-    hint.textContent = 'Read-only preview of PLAN.md.';
+  if (STATE.planEditing) {
+    hint.textContent = 'Editing PLAN.md — Ctrl/Cmd+S to save. The agent can also write this file.';
+  } else if (STATE.interviewMdFile === FILES.plan) {
+    hint.textContent = 'PLAN.md — click Edit to modify it here.';
   } else {
     hint.textContent = `Read-only preview of ${STATE.interviewMdFile}.`;
+  }
+}
+
+// Show Edit only for PLAN.md (the one writable template); Save/Cancel only while
+// editing. Also toggles the textarea's readonly state.
+function updatePlanEditUI() {
+  const editBtn = document.getElementById('btn-plan-edit');
+  const saveBtn = document.getElementById('btn-plan-save');
+  const cancelBtn = document.getElementById('btn-plan-cancel');
+  const editor = document.getElementById('editor-interview');
+  const isPlan = STATE.interviewMdFile === FILES.plan;
+  const editing = STATE.planEditing;
+  if (editBtn) editBtn.hidden = !isPlan || editing;
+  if (saveBtn) saveBtn.hidden = !editing;
+  if (cancelBtn) cancelBtn.hidden = !editing;
+  if (editor) editor.readOnly = !editing;
+  updateInterviewMdHint();
+}
+
+function startPlanEdit() {
+  if (STATE.interviewMdFile !== FILES.plan || !STATE.slug) return;
+  STATE.planEditing = true;
+  updatePlanEditUI();
+  const editor = document.getElementById('editor-interview');
+  if (editor) { editor.readOnly = false; try { editor.focus(); } catch (_) {} }
+}
+
+function cancelPlanEdit() {
+  if (!STATE.planEditing) return;
+  STATE.planEditing = false;
+  updatePlanEditUI();
+  // Reload the last-known file content, discarding edits.
+  loadInterviewMdIntoEditor();
+}
+
+async function savePlanEdit() {
+  if (!STATE.planEditing || !STATE.slug) return;
+  const editor = document.getElementById('editor-interview');
+  if (!editor) return;
+  const content = editor.value;
+  const saveBtn = document.getElementById('btn-plan-save');
+  if (saveBtn) saveBtn.disabled = true;
+  const slug = STATE.slug;
+  try {
+    await api('/api/tasks/' + encodeURIComponent(slug) + '/template', {
+      method: 'PUT',
+      body: JSON.stringify({ name: FILES.plan, content }),
+    });
+    // Reflect the saved content locally so the next poll doesn't show a diff.
+    STATE.interviewMdContents[FILES.plan] = content;
+    STATE.planEditing = false;
+    updatePlanEditUI();
+    STATE.previewCache.interview = null;
+    updateMarkdownPreview('interview', true);
+    toast('Saved PLAN.md', { type: 'success' });
+  } catch (err) {
+    toast(err.message || 'Failed to save PLAN.md', { type: 'error' });
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
   }
 }
 
@@ -980,7 +1103,7 @@ async function reorderTasksByDrag(dragSlug, targetSlug, afterTarget) {
     STATE.tasks = d.tasks || STATE.tasks || [];
     renderTasksFromState();
   } catch (e) {
-    alert(e.message);
+    toast(e.message, { type: 'error' });
     await loadTasks();
   }
 }
@@ -1049,8 +1172,11 @@ function renderTasksFromState() {
     });
     li.addEventListener('click', () => {
       if (TASK_JUST_DRAGGED) return;
-      if (STATE.slug === t.slug) clearTaskSelection();
-      else {
+      if (STATE.slug === t.slug) {
+        // User explicitly deselected -> stop auto-restoring it for this project.
+        forgetSelectedTask();
+        clearTaskSelection();
+      } else {
         selectTask(t.slug);
         if (isMobileViewport()) setSidebarOpen(false);
       }
@@ -1079,11 +1205,56 @@ function clearTaskSelection() {
   renderTaskSkillsPicker({});
 }
 
+const _LAST_TASK_LS_KEY = 'loom.lastTaskByProject';
+
+function loadLastTaskMap() {
+  try {
+    const raw = localStorage.getItem(_LAST_TASK_LS_KEY);
+    const obj = raw ? JSON.parse(raw) : null;
+    if (obj && typeof obj === 'object') STATE.lastTaskByProject = obj;
+  } catch (_) { /* localStorage unavailable / corrupt - ignore */ }
+}
+
+function persistLastTaskMap() {
+  try { localStorage.setItem(_LAST_TASK_LS_KEY, JSON.stringify(STATE.lastTaskByProject || {})); }
+  catch (_) { /* ignore */ }
+}
+
+function rememberSelectedTask(slug) {
+  if (!slug) return;
+  STATE.lastTaskByProject[STATE.projectId || 'default'] = slug;
+  persistLastTaskMap();
+}
+
+function forgetSelectedTask() {
+  const pid = STATE.projectId || 'default';
+  if (STATE.lastTaskByProject[pid] != null) {
+    delete STATE.lastTaskByProject[pid];
+    persistLastTaskMap();
+  }
+}
+
+// Re-select the task remembered for the current project (if it still exists and
+// nothing is selected yet). Called after a project's tasks finish loading so
+// switching projects / reloading restores the task you were on.
+async function restoreSelectedTaskForProject() {
+  if (!STATE.projectId || STATE.slug) return;
+  const slug = STATE.lastTaskByProject[STATE.projectId];
+  if (!slug) return;
+  if (!(STATE.tasks || []).some((t) => t.slug === slug)) {
+    forgetSelectedTask();   // stale (task deleted/renamed) - drop it
+    return;
+  }
+  await selectTask(slug);
+}
+
 async function selectTask(slug) {
   if (STATE.slug && STATE.slug !== slug) {
     savePaneDraftForTask(STATE.slug);
   }
   STATE.slug = slug;
+  rememberSelectedTask(slug);
+  STATE.planEditing = false;  // never carry an in-progress PLAN edit across tasks
   STATE.changesData = null;
   STATE.changesSelected = '';
   document.querySelectorAll('#task-list li').forEach((li) => {
@@ -1255,7 +1426,7 @@ async function onTaskSkillsChange(ev) {
       }
     }
   } catch (err) {
-    alert(err.message || 'failed to update skills');
+    toast(err.message || 'failed to update skills', { type: 'error' });
     if (previous) sel.value = previous;
   } finally {
     sel.disabled = false;
@@ -1279,7 +1450,7 @@ async function onAgentChange(ev) {
     });
     if (r.meta) await selectTask(STATE.slug);
   } catch (err) {
-    alert(err.message || 'agent switch failed');
+    toast(err.message || 'agent switch failed', { type: 'error' });
   }
 }
 
@@ -1337,7 +1508,7 @@ async function deleteSelectedTask() {
     await loadTasks();
     await loadTmuxSessions();
   } catch (e) {
-    alert(e.message);
+    toast(e.message, { type: 'error' });
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -1611,7 +1782,7 @@ async function mergeWorktree(path, btn) {
       const conflicts = (r.conflicts && r.conflicts.length)
         ? '\n\nConflicts:\n- ' + r.conflicts.join('\n- ')
         : '';
-      alert((r.error || 'merge failed') + conflicts);
+      toast((r.error || 'merge failed') + conflicts, { type: 'error', ttl: 9000 });
       btn.textContent = original;
       btn.disabled = false;
       return;
@@ -1620,7 +1791,7 @@ async function mergeWorktree(path, btn) {
     refreshChangesView(true);
     setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
   } catch (err) {
-    alert(err.message || 'merge failed');
+    toast(err.message || 'merge failed', { type: 'error' });
     btn.textContent = original;
     btn.disabled = false;
   }
@@ -1784,9 +1955,10 @@ function termExecCopy(text) {
 
 function termCopySelection() {
   if (!TERM.term) return;
-  // The live stream can clear xterm's selection on redraw, so fall back to the
-  // last non-empty selection we saw.
-  const sel = TERM.term.getSelection() || TERM.lastSelection || '';
+  // Prefer the snapshot captured when the selection last changed: a full-screen
+  // app repaints under a fixed selection, so a fresh getSelection() here can be
+  // offset by a few rows. Fall back to a live read only if we have no snapshot.
+  const sel = TERM.lastSelection || TERM.term.getSelection() || '';
   if (sel) termClipboardWrite(sel);
 }
 
@@ -1808,6 +1980,11 @@ function termKeyEvent(e, term) {
   if (e.ctrlKey && !e.metaKey && k === 'v') {
     return false;
   }
+  // Arrow keys are left to xterm's native handling on purpose: it emits the
+  // correct sequence for the pane's cursor-key mode AND scrolls the viewport to
+  // the bottom on input (so a menu at the bottom stays in view). Intercepting
+  // them and returning false dropped that scroll-to-bottom and made the screen
+  // jump up to the transcript while navigating Claude's menus.
   return true;
 }
 
@@ -1841,18 +2018,25 @@ function ensureTerminal() {
   try { if (fit) fit.fit(); } catch (e) {}
   term.onData((data) => termQueueInput(data));
   term.attachCustomKeyEventHandler((e) => termKeyEvent(e, term));
+  // Snapshot the selected TEXT the instant the selection geometry changes. In a
+  // full-screen TUI (Claude's fullscreen / alternate-screen renderer) the live
+  // stream repaints in place: the selection stays anchored to fixed row/col
+  // coordinates while the characters under them change. Reading getSelection()
+  // later (at mouseup / Cmd+C) then returns text that's offset by however many
+  // rows the app repainted — the "copy is misaligned" bug. The change-time
+  // snapshot matches what the user actually highlighted.
+  let dragSel = '';
+  host.addEventListener('mousedown', () => { dragSel = ''; });
   term.onSelectionChange(() => {
     const s = term.getSelection();
-    if (s) TERM.lastSelection = s;
+    if (s) { TERM.lastSelection = s; dragSel = s; }
   });
-  // Copy-on-select (tmux / iTerm style): copy the moment a selection finishes.
-  // This is the only reliable copy path here — the live PTY stream redraws and
-  // clears xterm's selection before a later Cmd/Ctrl+C keydown can read it, so
-  // copying at mouseup time is what actually works. Shortcuts below stay as a
-  // fallback for keyboard-only selection.
+  // Copy-on-select (tmux / iTerm style): copy the moment a selection finishes,
+  // using the drag-scoped snapshot (set only if THIS drag produced a selection,
+  // so a plain click doesn't re-copy a stale one). dragSel survives a redraw
+  // that clears xterm's live selection, so the copy still works.
   host.addEventListener('mouseup', () => {
-    const s = term.getSelection();
-    if (s && s.trim()) { TERM.lastSelection = s; termClipboardWrite(s); }
+    if (dragSel && dragSel.trim()) termClipboardWrite(dragSel);
   });
   // Native paste: clipboardData works even over plain http:// where the async
   // navigator.clipboard API is blocked. Capture phase so we beat xterm's own
@@ -1961,11 +2145,10 @@ function ensureTerminal() {
     clearPressTimer();
     if (touchMode === 'select') {
       const last = (e.changedTouches && e.changedTouches[0]) || { clientX: touchStartX, clientY: touchLastY };
+      // Bubbles to the host's copy-on-select handler, which copies the
+      // change-time snapshot (matching what was highlighted, not a shifted
+      // fresh read). The earlier synthetic mousedown/mousemove fed that snapshot.
       synthMouse('mouseup', last);
-      // mouseup on the host copies the selection (copy-on-select); nudge it in
-      // case the synthetic event didn't bubble to that listener.
-      const s = (() => { try { return term.getSelection(); } catch (_) { return ''; } })();
-      if (s && s.trim()) { TERM.lastSelection = s; termClipboardWrite(s); }
     } else if (touchMode === '') {
       // A quick tap (no drag, no long-press). We swallowed the synthesized click
       // in touchstart, so focus the terminal here to raise the soft keyboard.
@@ -2078,7 +2261,7 @@ function termScheduleRefresh() {
   }, 800);
 }
 
-// Small transient "已复制" toast shown after a successful clipboard copy.
+// Small transient "Copied" toast shown after a successful clipboard copy.
 function termFlashCopied() {
   const card = document.querySelector('.terminal-card--interview');
   if (!card) return;
@@ -2086,7 +2269,7 @@ function termFlashCopied() {
   if (!el) {
     el = document.createElement('div');
     el.className = 'term-copied-toast';
-    el.textContent = '已复制';
+    el.textContent = 'Copied';
     card.appendChild(el);
   }
   el.classList.add('is-show');
@@ -2098,6 +2281,49 @@ function disconnectTerminal() {
   if (TERM.abort) { try { TERM.abort.abort(); } catch (e) {} TERM.abort = null; }
   TERM.connected = false;
   TERM.target = '';
+}
+
+// Strip the app's MOUSE-mode enable/disable sequences from the PTY byte stream so
+// xterm never enters application-mouse mode — then a plain drag does native text
+// selection (-> copy-on-select -> browser clipboard) instead of being forwarded
+// to the app (which copies into the server-side tmux buffer). Deliberately
+// byte-level and surgical: it only drops a COMPLETE `ESC [ ? <params> (h|l)`
+// whose params are ALL mouse modes, never decodes, never reconstructs, never
+// buffers across chunks — so it cannot corrupt other sequences / full-screen
+// rendering (which an earlier decode+carry approach did). A mouse sequence split
+// across two read chunks is simply left in; apps re-emit modes on redraw so it
+// self-heals. Scrolling is unaffected (server-side, and tmux still sees the
+// app's mouse mode). Clicks no longer reach the app — an accepted trade-off.
+const _MOUSE_MODE_SET = new Set([1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016]);
+function stripMouseModeBytes(u8) {
+  if (!u8 || u8.length < 4) return u8;
+  let hit = false;
+  for (let i = 0; i + 3 < u8.length; i++) {
+    if (u8[i] === 0x1b && u8[i + 1] === 0x5b && u8[i + 2] === 0x3f) { hit = true; break; }
+  }
+  if (!hit) return u8;
+  const n = u8.length;
+  const out = new Uint8Array(n);
+  let w = 0;
+  let i = 0;
+  while (i < n) {
+    if (i + 3 < n && u8[i] === 0x1b && u8[i + 1] === 0x5b && u8[i + 2] === 0x3f) {
+      let j = i + 3;
+      let params = '';
+      while (j < n && ((u8[j] >= 0x30 && u8[j] <= 0x39) || u8[j] === 0x3b)) {
+        params += String.fromCharCode(u8[j]); j++;
+      }
+      if (j < n && (u8[j] === 0x68 || u8[j] === 0x6c)) {  // 'h' set / 'l' reset
+        const nums = params.split(';').filter(Boolean).map(Number);
+        if (nums.length && nums.every((x) => _MOUSE_MODE_SET.has(x))) {
+          i = j + 1;  // drop the whole mouse-mode sequence
+          continue;
+        }
+      }
+    }
+    out[w++] = u8[i++];
+  }
+  return out.subarray(0, w);
 }
 
 async function connectTerminal(target, force = false) {
@@ -2144,7 +2370,7 @@ async function connectTerminal(target, force = false) {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      if (value && TERM.term && TERM.target === target) TERM.term.write(value);
+      if (value && TERM.term && TERM.target === target) TERM.term.write(stripMouseModeBytes(value));
     }
   } catch (err) {
     if (err && err.name !== 'AbortError') console.debug('terminal stream error', err);
@@ -2155,16 +2381,37 @@ async function connectTerminal(target, force = false) {
 
 function startPanePolling() {
   if (STATE.paneTimer) clearInterval(STATE.paneTimer);
+  STATE.paneTick = 0;
   STATE.paneTimer = setInterval(() => {
+    // Don't poll while the browser tab is in the background — saves a steady
+    // stream of requests when nobody's looking. visibilitychange re-syncs on return.
+    if (document.hidden) return;
     if (!STATE.slug) return;
     const claudeTab = document.querySelector('.tab-panel[data-panel="claude"]');
-    if (claudeTab && !claudeTab.hidden) {
-      refreshInterviewPreview(true);
+    if (!claudeTab || claudeTab.hidden) return;
+    // The markdown preview tracks PLAN.md edits, so refresh it every cycle (4s).
+    refreshInterviewPreview(true);
+    // Sessions list + scanned md files change rarely — poll them ~every 12s
+    // instead of every cycle to cut redundant requests by ~2/3.
+    STATE.paneTick = (STATE.paneTick || 0) + 1;
+    if (STATE.paneTick % 3 === 0) {
       refreshTaskTemplates();
       refreshClaudeSessions();
     }
   }, 4000);
 }
+
+// When the tab becomes visible again, refresh once immediately instead of
+// waiting up to a full poll interval (and the paused pollers resume on their own).
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !STATE.slug) return;
+  const claudeTab = document.querySelector('.tab-panel[data-panel="claude"]');
+  if (claudeTab && !claudeTab.hidden) {
+    refreshInterviewPreview(true);
+    refreshTaskTemplates();
+    refreshClaudeSessions();
+  }
+});
 
 async function startInterviewPane() {
   if (!STATE.slug) return;
@@ -2193,7 +2440,7 @@ async function pasteInterviewPrompt() {
   if (!STATE.slug) return;
   const target = $('#inp-interview-target').value.trim();
   if (!target) {
-    alert('Start the Claude pane first.');
+    toast('Start the Claude pane first.', { type: 'error' });
     return;
   }
   const btn = document.getElementById('btn-interview-paste');
@@ -2225,7 +2472,7 @@ function currentPlanPathForPrompt() {
 async function sendWorkflowPrompt(kind, text) {
   const target = $('#inp-interview-target').value.trim();
   if (!STATE.slug || !target) {
-    alert('Start the Claude pane first.');
+    toast('Start the Claude pane first.', { type: 'error' });
     return;
   }
   try {
@@ -2288,7 +2535,7 @@ Remove obsolete noisy details, but preserve unrelated prior sections. Do not cre
 
 function openCreateModal() {
   if (!STATE.projectId) {
-    alert('Select or add a project first.');
+    toast('Select or add a project first.', { type: 'error' });
     return;
   }
   const modal = $('#create-modal');
@@ -2425,7 +2672,7 @@ function makeEditable(el, { multiline = false, placeholder = '', onSave }) {
       el.textContent = next;
       try { await onSave(next); } catch (err) {
         el.textContent = current;
-        alert(err.message || 'save failed');
+        toast(err.message || 'save failed', { type: 'error' });
       }
     };
     input.addEventListener('blur', () => finish(true));
@@ -2501,9 +2748,56 @@ document.getElementById('btn-worktree-push-all').addEventListener('click', pushA
 
 // ===== Project NOTES.md modal =====
 
+// Tab / Shift+Tab indent for a <textarea> markdown editor. Tab inserts 2 spaces
+// (or indents all selected lines); Shift+Tab removes up to 2 leading spaces from
+// each selected line. Returns true if it handled the key. Preserves undo where
+// the browser supports execCommand('insertText').
+const _INDENT = '  ';
+function handleEditorTab(ev, editor) {
+  if (ev.key !== 'Tab' || ev.ctrlKey || ev.metaKey || ev.altKey) return false;
+  ev.preventDefault();
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const val = editor.value;
+  const lineStart = val.lastIndexOf('\n', start - 1) + 1;
+  const multiLine = val.slice(start, end).includes('\n');
+  if (!ev.shiftKey && !multiLine) {
+    // Simple insert at caret (keeps native undo via execCommand when available).
+    if (document.execCommand) { document.execCommand('insertText', false, _INDENT); }
+    else {
+      editor.value = val.slice(0, start) + _INDENT + val.slice(end);
+      editor.selectionStart = editor.selectionEnd = start + _INDENT.length;
+    }
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
+  // Block (un)indent across the selected lines.
+  const block = val.slice(lineStart, end);
+  const lines = block.split('\n');
+  let delta = 0; let firstDelta = 0;
+  const newLines = lines.map((ln, idx) => {
+    if (ev.shiftKey) {
+      const m = ln.match(/^( {1,2}|\t)/);
+      const removed = m ? m[0].length : 0;
+      if (idx === 0) firstDelta = -removed;
+      delta -= removed;
+      return removed ? ln.slice(removed) : ln;
+    }
+    if (idx === 0) firstDelta = _INDENT.length;
+    delta += _INDENT.length;
+    return _INDENT + ln;
+  });
+  const replacement = newLines.join('\n');
+  editor.value = val.slice(0, lineStart) + replacement + val.slice(end);
+  editor.selectionStart = Math.max(lineStart, start + firstDelta);
+  editor.selectionEnd = end + delta;
+  editor.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+}
+
 async function openNotesModal() {
   if (!STATE.projectId) {
-    alert('Select or add a project first.');
+    toast('Select or add a project first.', { type: 'error' });
     return;
   }
   const modal = $('#notes-modal');
@@ -2573,8 +2867,41 @@ async function saveNotes() {
     if ((ev.ctrlKey || ev.metaKey) && (ev.key === 's' || ev.key === 'S')) {
       ev.preventDefault();
       saveNotes();
+    } else {
+      handleEditorTab(ev, editor);
     }
   });
+})();
+
+// Inline PLAN.md editing on the Claude tab: Edit toggles the read-only preview
+// textarea into an editor, Save PUTs it, Ctrl/Cmd+S saves, live-preview updates.
+(function initPlanEditor() {
+  const editor = document.getElementById('editor-interview');
+  const editBtn = document.getElementById('btn-plan-edit');
+  const saveBtn = document.getElementById('btn-plan-save');
+  const cancelBtn = document.getElementById('btn-plan-cancel');
+  if (editBtn) editBtn.addEventListener('click', startPlanEdit);
+  if (saveBtn) saveBtn.addEventListener('click', savePlanEdit);
+  if (cancelBtn) cancelBtn.addEventListener('click', cancelPlanEdit);
+  if (editor) {
+    editor.addEventListener('input', () => {
+      if (!STATE.planEditing) return;
+      STATE.previewCache.interview = null;
+      requestAnimationFrame(() => updateMarkdownPreview('interview', true));
+    });
+    editor.addEventListener('keydown', (ev) => {
+      if (!STATE.planEditing) return;
+      if ((ev.ctrlKey || ev.metaKey) && (ev.key === 's' || ev.key === 'S')) {
+        ev.preventDefault();
+        savePlanEdit();
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        cancelPlanEdit();
+      } else {
+        handleEditorTab(ev, editor);
+      }
+    });
+  }
 })();
 
 document.getElementById('btn-notes-open').addEventListener('click', openNotesModal);
@@ -2634,7 +2961,41 @@ async function loadKernelPlugins() {
     $('#kernel-plugin').addEventListener('change', applyKernelShapeTemplate);
     STATE.kernelPluginListenerBound = true;
   }
+  restoreKernelLaunchPrefs();
   applyKernelShapeTemplate();
+}
+
+// Remember the launch form (plugin/target/model/agents/starter) per project so
+// you don't retype it every run. localStorage; interview specs still override.
+function _kernelPrefsKey() { return `loom.kernelLaunch.${STATE.projectId || 'default'}`; }
+
+function saveKernelLaunchPrefs() {
+  try {
+    localStorage.setItem(_kernelPrefsKey(), JSON.stringify({
+      plugin: $('#kernel-plugin')?.value || '',
+      target: $('#kernel-target')?.value || '',
+      model: $('#kernel-model')?.value || '',
+      n_agents: $('#kernel-nagents')?.value || '',
+      starter_mode: $('#kernel-starter')?.value || '',
+    }));
+  } catch (_) { /* ignore */ }
+}
+
+function restoreKernelLaunchPrefs() {
+  let p;
+  try { p = JSON.parse(localStorage.getItem(_kernelPrefsKey()) || 'null'); }
+  catch (_) { p = null; }
+  if (!p) return;
+  const setIfOption = (id, val) => {
+    if (!val) return;
+    const el = document.getElementById(id);
+    if (el && [...el.options].some((o) => o.value === val)) el.value = val;
+  };
+  setIfOption('kernel-plugin', p.plugin);
+  setIfOption('kernel-target', p.target);
+  setIfOption('kernel-starter', p.starter_mode);
+  if (p.model && $('#kernel-model')) $('#kernel-model').value = p.model;
+  if (p.n_agents && $('#kernel-nagents')) $('#kernel-nagents').value = p.n_agents;
 }
 
 // Runs that change over time and so are worth re-fetching/re-rendering live.
@@ -2781,10 +3142,14 @@ function renderKernelRunDetail(r) {
   const shapeSrc = cfg.shape_source ? ` <span class="kernel-shape-src">(${escapeHtml(cfg.shape_source)})</span>` : '';
 
   let html = `<div class="kernel-detail__head"><h4>${escapeHtml(plugin || '?')} <span class="kernel-detail__target">${escapeHtml(target)}</span>${vbadge}${legacy}</h4>`;
+  html += '<div class="kernel-detail__head-actions">';
   if (['launching', 'running'].includes(r.state)) {
     html += `<button type="button" class="btn btn--danger btn--sm" id="btn-kernel-stop">Stop</button>`;
+  } else {
+    // Finished/errored/stopped run: allow clearing its record from the list.
+    html += `<button type="button" class="btn btn--sm" id="btn-kernel-delete">Delete run</button>`;
   }
-  html += '</div>';
+  html += '</div></div>';
 
   // Status chips
   const agentsRunning = st.agents_running || 0;
@@ -2863,6 +3228,8 @@ function renderKernelRunDetail(r) {
   host.innerHTML = html;
   const stopBtn = $('#btn-kernel-stop');
   if (stopBtn) stopBtn.addEventListener('click', () => stopKernelRun(r.id));
+  const delBtn = $('#btn-kernel-delete');
+  if (delBtn) delBtn.addEventListener('click', () => deleteKernelRun(r.id));
   const verBtn = $('#btn-kernel-verify');
   if (verBtn) verBtn.addEventListener('click', () => markPluginVerified(plugin));
   const bestFull = $('#btn-kernel-best-full');
@@ -3088,6 +3455,7 @@ async function launchKernelRun() {
     : 'Launching… the agent is choosing a shape, then building (first run can take a few minutes)';
   try {
     const r = await api('/api/kernel/runs', { method: 'POST', body: JSON.stringify(body) });
+    saveKernelLaunchPrefs();
     status.textContent = 'Launched ' + r.id + ' — starting agents…';
     STATE.kernelSelected = r.id;
     await loadKernelRuns();
@@ -3103,13 +3471,29 @@ async function stopKernelRun(id) {
     await api('/api/kernel/runs/' + encodeURIComponent(id) + '/stop', { method: 'POST' });
     await loadKernelRuns();
     await selectKernelRun(id);
-  } catch (err) { alert(err.message || 'Stop failed'); }
+  } catch (err) { toast(err.message || 'Stop failed', { type: 'error' }); }
+}
+
+async function deleteKernelRun(id) {
+  if (!confirm('Delete this run record? This removes it from the list (on-disk kernels in the worktree are untouched).')) return;
+  try {
+    await api('/api/kernel/runs/' + encodeURIComponent(id), { method: 'DELETE' });
+    if (STATE.kernelSelected === id) {
+      STATE.kernelSelected = null;
+      const host = document.getElementById('kernel-run-detail');
+      if (host) { host.hidden = true; host.innerHTML = ''; }
+    }
+    STATE.kernelRunsSig = null;  // force list rebuild
+    await loadKernelRuns();
+    toast('Run deleted', { type: 'success' });
+  } catch (err) { toast(err.message || 'Delete failed', { type: 'error' }); }
 }
 
 function startKernelPolling() {
   if (STATE.kernelTimer) clearInterval(STATE.kernelTimer);
   STATE.kernelPollTick = 0;
   STATE.kernelTimer = setInterval(async () => {
+    if (document.hidden) return;
     const panel = document.querySelector('.tab-panel[data-panel="kernel"]');
     if (!panel || panel.hidden || STATE.kernelPolling) return;
     STATE.kernelPolling = true;
@@ -3268,7 +3652,7 @@ async function markPluginVerified(name) {
     await loadKernelPlugins();
     await loadKernelRuns();
     if (STATE.kernelSelected) await selectKernelRun(STATE.kernelSelected);
-  } catch (err) { alert(err.message || 'verify failed'); }
+  } catch (err) { toast(err.message || 'verify failed', { type: 'error' }); }
 }
 
 function showKernelSpec(spec) {
@@ -3649,7 +4033,7 @@ async function pushWorktree(path, btn) {
   } catch (err) {
     btn.textContent = original;
     btn.disabled = false;
-    alert(err.message || 'push failed');
+    toast(err.message || 'push failed', { type: 'error' });
   }
 }
 
@@ -3670,10 +4054,10 @@ async function pushAllWorktrees() {
       const tag = row.ok ? 'ok' : 'failed';
       return `${tag}: ${row.path} → ${row.branch || '(no branch)'}\n  ${row.message || row.error || ''}`;
     });
-    alert(`Pushed ${r.results.filter((x) => x.ok).length}/${r.count}\n\n${lines.join('\n\n')}`);
+    toast(`Pushed ${r.results.filter((x) => x.ok).length}/${r.count}\n\n${lines.join('\n\n')}`, { type: 'success', ttl: 9000 });
     await refreshTaskTemplates();
   } catch (err) {
-    alert(err.message || 'push-all failed');
+    toast(err.message || 'push-all failed', { type: 'error' });
   } finally {
     btn.textContent = original;
     btn.disabled = false;
@@ -3690,7 +4074,7 @@ async function removeWorktree(path) {
     );
     await selectTask(STATE.slug);
   } catch (err) {
-    alert(err.message || 'remove failed');
+    toast(err.message || 'remove failed', { type: 'error' });
   }
 }
 
@@ -3740,7 +4124,7 @@ async function resumeClaudeSession(sessionId) {
     await refreshInterviewPreview(true);
     await refreshClaudeSessions();
   } catch (err) {
-    alert(err.message || 'resume failed');
+    toast(err.message || 'resume failed', { type: 'error' });
   }
 }
 
@@ -3802,7 +4186,7 @@ document.getElementById('btn-changes-refresh').addEventListener('click', () => r
     }
   });
   if (sendBtn) sendBtn.addEventListener('click', submitCompose);
-  // Collapsed by default; the 中文 button reveals the reliable-IME compose box.
+  // Collapsed by default; the Chinese Input button reveals the reliable-IME compose box.
   if (toggle) toggle.addEventListener('click', () => setOpen(box && box.hidden));
 })();
 
@@ -3827,10 +4211,10 @@ document.getElementById('btn-changes-refresh').addEventListener('click', () => r
 })();
 
 // Kill the current task's tmux pane (kill-session + every brand/agent alias).
-// Shared by the toolbar "Stop" button and the terminal-bar "关闭 tmux" button.
+// Shared by the toolbar "Stop" button and the terminal-bar "Close Tmux" button.
 async function stopClaudePane() {
   if (!STATE.slug) return;
-  if (!confirm('关闭当前 tmux 会话？正在运行的 agent 会被一并终止。')) return;
+  if (!confirm('Close the current tmux session? Any running agent will be terminated too.')) return;
   const killBtn = document.getElementById('term-kill');
   const stopBtn = document.getElementById('btn-interview-stop');
   if (killBtn) killBtn.disabled = true;
@@ -3845,11 +4229,11 @@ async function stopClaudePane() {
     const lbl = $('#interview-target-label');
     if (lbl) lbl.textContent = 'Not started';
     disconnectTerminal();
-    setTmuxOutputText(`已关闭 ${r.tmux_session || ''}\n${r.tmux_message || ''}`.trim());
+    setTmuxOutputText(`Closed ${r.tmux_session || ''}\n${r.tmux_message || ''}`.trim());
     refreshInterviewPreview(true);
     refreshClaudeSessions();
   } catch (err) {
-    alert((err && err.message) || '关闭 tmux 失败');
+    toast((err && err.message) || 'Failed to close tmux', { type: 'error' });
   } finally {
     if (killBtn) killBtn.disabled = false;
     if (stopBtn) stopBtn.disabled = false;
@@ -3899,13 +4283,15 @@ document.getElementById('btn-new-task').addEventListener('click', async () => {
   buildTabs();
   initMarkdownPreviews();
   initFullscreenPreviews();
+  loadLastTaskMap();
   try {
     await loadProjectsList();
     await loadProject();
     await loadTmuxSessions();
     await loadTasks();
+    await restoreSelectedTaskForProject();
   } catch (e) {
     console.error(e);
-    alert(e.message);
+    toast(e.message, { type: 'error' });
   }
 })();

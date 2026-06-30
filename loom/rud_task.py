@@ -132,9 +132,13 @@ def task_root(project_root: Path, slug: str) -> Path:
 def list_task_worktrees(project_root: Path, slug: str) -> list[Path]:
     """Return every git work-tree directory under ``<task>/work/`` sorted by name.
 
-    A child counts only if it looks like a git work tree (``.git`` exists
-    as a file or directory, OR ``git rev-parse`` agrees), so leftover
-    non-git folders won't confuse the UI.
+    A child counts only if it is itself a git work-tree ROOT: it has its own
+    ``.git`` (a worktree's ``.git`` file or a repo's ``.git`` dir), or
+    ``git rev-parse`` reports its toplevel as the child itself. A plain folder
+    is NOT a worktree just because it happens to sit inside an outer git repo —
+    ``git_toplevel`` walks *up*, so a bare ``work/k8s`` / ``work/configs`` dir
+    living under an enclosing ``~/`` repo would otherwise be mistaken for a
+    worktree and leak that repo's (e.g. k8s) commits into the task's Changes.
     """
     work = task_root(project_root, slug) / WORK_SUBDIR
     if not work.is_dir():
@@ -151,7 +155,8 @@ def list_task_worktrees(project_root: Path, slug: str) -> list[Path]:
         except OSError:
             continue
         dotgit = child / ".git"
-        if dotgit.exists() or git_toplevel(child) is not None:
+        top = git_toplevel(child)
+        if dotgit.exists() or (top is not None and top.resolve() == child.resolve()):
             out.append(child.resolve())
     return out
 
@@ -1329,28 +1334,39 @@ def direct_child_git_repos(parent: Path) -> list[Path]:
 def list_worktree_candidates(project_root: Path) -> list[dict[str, Any]]:
     """Git repos a task can branch a worktree from.
 
-    - If *project_root* itself is a git repo, returns just that one with
+    - If *project_root* is itself a git repo root, returns just that one with
       ``kind == "self"``.
-    - Otherwise scans immediate subdirectories for git repos and returns
-      each with ``kind == "child"``.  Useful when the registered project
-      is a container directory holding several clones side-by-side (e.g.
-      ``~/work/xorl/{xorl-internal,xorl-eval}``).
+    - Otherwise scans immediate subdirectories for git repos and returns each
+      with ``kind == "child"``.  Useful when the registered project is a
+      container directory holding several clones side-by-side (e.g.
+      ``~/xorl/{xorl-internal,xorl-eval}``).
+    - Only if neither applies (the project dir sits inside an outer repo and has
+      no child repos) do we fall back to that enclosing repo.
+
+    Order matters: ``git_toplevel`` walks *up*, so for a container dir that lives
+    inside an outer git repo (e.g. ``~/xorl`` inside a ``~/`` repo) it would
+    return the *outer* repo. Checking "self" exactly and preferring child repos
+    first stops "Add worktree" from wrongly forking the parent repo.
     """
     try:
         project_root = project_root.resolve()
     except OSError:
         return []
     git_root = git_toplevel(project_root)
+    git_root = git_root.resolve() if git_root is not None else None
+    # 1) project_root is exactly a git repo root -> that repo.
+    if git_root is not None and git_root == project_root:
+        return [{"path": str(git_root), "name": git_root.name, "kind": "self"}]
+    # 2) Container dir holding side-by-side repos -> those child repos. Prefer
+    #    this over the enclosing repo so a project nested inside an outer repo
+    #    branches its own repos, not the parent.
+    children = direct_child_git_repos(project_root)
+    if children:
+        return [{"path": str(p), "name": p.name, "kind": "child"} for p in children]
+    # 3) No child repos and project_root sits inside a repo -> the enclosing repo.
     if git_root is not None:
-        return [{
-            "path": str(git_root),
-            "name": git_root.name,
-            "kind": "self",
-        }]
-    return [
-        {"path": str(p), "name": p.name, "kind": "child"}
-        for p in direct_child_git_repos(project_root)
-    ]
+        return [{"path": str(git_root), "name": git_root.name, "kind": "self"}]
+    return []
 
 
 def _record_worktree_base(

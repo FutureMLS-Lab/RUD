@@ -486,7 +486,7 @@ select:focus-visible { outline: none; border-color: var(--border-focus); box-sha
   }
   .term-key:active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 }
-/* "中文输入" toggle in the terminal title bar — reveals the compose box. */
+/* "Chinese Input" toggle in the terminal title bar — reveals the compose box. */
 .term-compose-toggle {
   display: inline-flex;
   align-items: center;
@@ -570,7 +570,7 @@ select:focus-visible { outline: none; border-color: var(--border-focus); box-sha
 }
 
 /* Compose box: reliable IME / long-text input that sends into the pane.
-   Collapsed by default (hidden), toggled open by the 中文 button. */
+   Collapsed by default (hidden), toggled open by the Chinese Input button. */
 .term-compose {
   display: flex;
   gap: 10px;
@@ -647,6 +647,41 @@ select:focus-visible { outline: none; border-color: var(--border-focus); box-sha
   transition: opacity 0.16s ease, transform 0.16s ease;
 }
 .term-copied-toast.is-show { opacity: 1; transform: translateY(0); }
+/* App-level non-blocking toasts (bottom-right stack). */
+.toast-host {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(420px, 92vw);
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--bg-elev-2, #2b2620);
+  color: var(--text, #e7ddcf);
+  border: 1px solid var(--border, #4a4036);
+  border-left: 3px solid var(--accent, #f59e0b);
+  font-family: var(--font-sans);
+  font-size: 0.86rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.toast.is-show { opacity: 1; transform: translateY(0); }
+.toast--error { border-left-color: #e06c5a; }
+.toast--success { border-left-color: #9ec46a; }
+@media (max-width: 480px) {
+  .toast-host { left: 12px; right: 12px; bottom: 12px; max-width: none; }
+}
 @media (max-width: 480px) {
   .term-compose-toggle__label { display: none; }
   .term-compose-toggle { padding: 4px 6px; }
@@ -764,10 +799,18 @@ select:focus-visible { outline: none; border-color: var(--border-focus); box-sha
 .markdown-preview h1 { margin: 0 0 16px; font-size: 1.65rem; }
 .markdown-preview h2 { margin: 24px 0 10px; font-size: 1.2rem; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 .markdown-preview h3 { margin: 18px 0 8px; font-size: 1rem; }
+.markdown-preview h4 { margin: 16px 0 6px; font-size: 0.95rem; }
+.markdown-preview h5 { margin: 14px 0 6px; font-size: 0.88rem; }
+.markdown-preview h6 { margin: 12px 0 6px; font-size: 0.82rem; color: var(--text-dim); }
 .markdown-preview p { margin: 8px 0; color: var(--text); }
 .markdown-preview ul,
 .markdown-preview ol { margin: 8px 0 12px 20px; padding: 0; }
 .markdown-preview li { margin: 4px 0; }
+.markdown-preview li.md-task { list-style: none; margin-left: -18px; display: flex; align-items: flex-start; gap: 7px; }
+.markdown-preview li.md-task input { margin-top: 3px; flex: 0 0 auto; accent-color: var(--accent); }
+.markdown-preview hr { margin: 18px 0; border: 0; border-top: 1px solid var(--border); }
+.markdown-preview img.md-img { max-width: 100%; height: auto; border-radius: var(--radius-sm); margin: 8px 0; }
+.markdown-preview del { color: var(--text-dim); }
 .markdown-preview blockquote {
   margin: 12px 0;
   padding: 8px 12px;
@@ -999,6 +1042,7 @@ select:focus-visible { outline: none; border-color: var(--border-focus); box-sha
   color: var(--text-dim);
   font-size: 0.83rem;
 }
+.interview-md-bar__spacer { flex: 1 1 auto; }
 .interview-md-bar__hint strong {
   color: var(--text);
   font-weight: 600;
@@ -2732,6 +2776,7 @@ textarea.editable__input {
   margin-bottom: 10px;
 }
 .kernel-detail__head h4 { margin: 0; font-size: 14px; }
+.kernel-detail__head-actions { display: flex; gap: 8px; flex: 0 0 auto; }
 .kernel-detail__grid {
   display: grid;
   grid-template-columns: max-content 1fr;

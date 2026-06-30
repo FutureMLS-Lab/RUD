@@ -400,6 +400,22 @@ def _kernel_read_record(root: Path, run_uid: str) -> dict[str, Any] | None:
         return None
 
 
+def _kernel_delete_record(root: Path, run_uid: str) -> bool:
+    """Remove a run's record JSON (and its build log) from disk. Used by the UI
+    to clear finished/errored runs. Returns True if the JSON existed."""
+    d = _kernel_runs_dir(root)
+    existed = False
+    for f in (d / f"{run_uid}.json", d / f"{run_uid}.json.tmp", d / f"{run_uid}.log"):
+        try:
+            if f.is_file():
+                if f.suffix == ".json":
+                    existed = True
+                f.unlink()
+        except OSError:
+            pass
+    return existed
+
+
 def _sweep_stale_kernel_runs(roots: list[Path]) -> int:
     """Mark any ``launching``/``resolving`` run records as ``error`` across the
     given project roots. Called at server startup: a launch/prepare's worker
@@ -444,17 +460,16 @@ def _kernel_list_records(root: Path, slug: str | None = None) -> list[dict[str, 
         except (json.JSONDecodeError, OSError):
             continue
     if slug:
-        # Scope to this task. Runs created before per-task scoping have no slug:
-        # keep showing them (flagged ``legacy``) so old/in-flight runs stay
-        # visible and stoppable, but never leak a run that belongs to a *different*
-        # task into this one.
+        # Strict per-task scoping: a task shows ONLY its own runs (matched by the
+        # Loom task slug). Older runs created before per-task scoping have no slug
+        # and used to be shown under *every* task — that made separate kernel
+        # tasks appear to "share" the same runs/leaderboards. They no longer leak
+        # across tasks; such orphans simply don't appear under any task (the JSON
+        # files remain on disk and can be cleaned up or re-attributed manually).
         scoped: list[dict[str, Any]] = []
         for r in recs:
             rslug = str(r.get("slug") or r.get("task_slug") or "").strip()
             if rslug == slug:
-                scoped.append(r)
-            elif not rslug:
-                r["legacy"] = True
                 scoped.append(r)
         recs = scoped
     recs.sort(key=lambda r: r.get("created_at", 0.0), reverse=True)
@@ -3368,6 +3383,35 @@ def make_handler(
                 return
             parsed = urlparse(self.path)
             path = parsed.path
+
+            m_krun_del = re.match(r"^/api/kernel/runs/([^/]+)$", path)
+            if m_krun_del:
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                run_uid = m_krun_del.group(1)
+                if not _KERNEL_ID_RE.match(run_uid):
+                    st, b, h = _json_bytes({"error": "invalid run id"}, 400)
+                    self._send(st, b, h)
+                    return
+                rec = _kernel_read_record(root, run_uid)
+                if rec is None:
+                    st, b, h = _json_bytes({"error": "not found"}, 404)
+                    self._send(st, b, h)
+                    return
+                # A live run must be stopped before its record can be deleted, so
+                # we never orphan running agent containers.
+                if rec.get("state") in ("launching", "running", "resolving"):
+                    st, b, h = _json_bytes(
+                        {"error": "stop the run before deleting it"}, 409
+                    )
+                    self._send(st, b, h)
+                    return
+                _kernel_delete_record(root, run_uid)
+                st, b, h = _json_bytes({"ok": True, "id": run_uid})
+                self._send(st, b, h)
+                return
 
             m_mon_del = re.match(r"^/api/tasks/([^/]+)/monitor$", path)
             if m_mon_del:

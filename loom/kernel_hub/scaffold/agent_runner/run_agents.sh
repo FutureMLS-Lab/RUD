@@ -252,8 +252,11 @@ for i in $(seq 1 "$N_AGENTS"); do
         cat "$SCAFFOLD_DIR/knowledge_base/REFERENCE.md" >> "$WORKDIR/$INSTRUCTIONS_FILE"
     fi
 
+    # Skills live in .agents/skills/ and are surfaced to the agent via the
+    # instructions ("read .agents/skills/<name>/SKILL.md"). Both CLIs read them
+    # with their own Read/grep tools, so copy them in regardless of CLI.
+    cp -r "$SCRIPT_DIR/.agents" "$WORKDIR/"
     if [ "$CLI" = "codex" ]; then
-        cp -r "$SCRIPT_DIR/.agents" "$WORKDIR/"
         mkdir -p "$WORKDIR/.codex"
         cp "$SCRIPT_DIR/config.toml" "$WORKDIR/.codex/config.toml"
         sed -i "s/^model = .*/model = \"$MODEL\"/" "$WORKDIR/.codex/config.toml"

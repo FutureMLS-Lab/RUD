@@ -192,12 +192,16 @@ def send_pane_key(target: str, key: str) -> tuple[bool, str]:
         return False, "invalid pane target (expected session:window.pane)"
     if k not in _KEYS and not _KEY_RE.match(k):
         return False, f"unsupported key: {k}"
+    env = tmux_subprocess_env()
+    # Match send_pane_literal: if the user scrolled up (copy-mode), leave it so
+    # the key reaches the running program instead of moving the copy cursor.
+    _exit_copy_mode_if_active(t, env)
     try:
         r = subprocess.run(
             ["tmux", "send-keys", "-t", t, k],
             capture_output=True,
             text=True,
-            env=tmux_subprocess_env(),
+            env=env,
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -367,23 +371,47 @@ def scroll_pane(target: str, direction: str = "up", lines: int = 3) -> tuple[boo
     env = tmux_subprocess_env()
 
     # Probe the pane: already browsing copy-mode? running a full-screen app?
+    # has the app turned on mouse reporting (so it wants wheel events itself)?
     in_mode = False
     alt_screen = False
+    mouse_on = False
     try:
         chk = subprocess.run(
-            ["tmux", "display-message", "-p", "-t", t, "#{pane_in_mode},#{alternate_on}"],
+            ["tmux", "display-message", "-p", "-t", t,
+             "#{pane_in_mode},#{alternate_on},#{mouse_any_flag}"],
             capture_output=True, text=True, env=env, timeout=5,
         )
         parts = (chk.stdout or "").strip().split(",")
-        if len(parts) == 2:
+        if len(parts) == 3:
             in_mode = parts[0] == "1"
             alt_screen = parts[1] == "1"
+            mouse_on = parts[2] == "1"
     except (OSError, subprocess.TimeoutExpired):
         pass
 
-    # Full-screen app and not already in tmux copy-mode: scroll the app itself.
-    # PgUp/PgDn move ~half a screen, so collapse the wheel's line count into a
-    # small number of key presses instead of one press per line.
+    # App captures the mouse (Claude's fullscreen TUI, vim/less with mouse, …)
+    # and we're not browsing tmux copy-mode: forward REAL wheel events so the app
+    # scrolls a few lines at a time, exactly like a hardware wheel. This is what
+    # a normal terminal does (tmux's own WheelUpPane forwards when mouse is on),
+    # and it keeps a small touchpad nudge to a small scroll instead of the
+    # half-screen jumps that PgUp/PgDn caused. SGR mouse encoding (button 64 =
+    # wheel up, 65 = wheel down) at a fixed in-pane coordinate.
+    if mouse_on and not in_mode:
+        button = 65 if direction == "down" else 64
+        # The wheel's line count is already coalesced client-side; turn it into a
+        # gentle, capped number of notches so a fast flick can't fling the view.
+        notches = max(1, min(5, round(n / 8)))
+        seq = f"\x1b[<{button};1;1M" * notches
+        cmd = ["tmux", "send-keys", "-t", t, "-l", "--", seq]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=5)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, str(e)
+        return (r.returncode == 0), (r.stderr or "").strip()
+
+    # Full-screen app WITHOUT mouse reporting: no wheel to forward, so fall back
+    # to PgUp/PgDn (half a screen each). Collapse the line count into a small
+    # number of presses instead of one per line.
     if alt_screen and not in_mode:
         key = "PageDown" if direction == "down" else "PageUp"
         presses = max(1, min(10, round(n / 8)))
